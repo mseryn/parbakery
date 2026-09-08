@@ -1,0 +1,36 @@
+# pyproject.toml -- settings for this project.
+#
+# This file does not run. It is a place for tools to look up how they should
+# behave here, so those settings live in one file instead of being remembered
+# and retyped on the command line.
+
+
+# --- What this project is called ------------------------------------------
+# Descriptive only. Nothing reads this yet; it is here so the project has a
+# name and a version recorded somewhere obvious as it grows.
+[project]
+name = "parbake"
+version = "0.1.0"
+description = "Documents directories of HPC data files."
+requires-python = ">=3.9"
+
+
+# --- Settings for pytest ---------------------------------------------------
+# Everything under this heading is read by pytest when it runs.
+[tool.pytest.ini_options]
+
+# Where to look for tests when you run `pytest` with no arguments.
+testpaths = ["tests"]
+
+# Where Python should look for our own code when running tests.
+#
+# The test file starts with `from document_directory import ...`, and Python
+# has to be told where that lives. Today pytest usually works this out on its
+# own, so this line is mostly insurance -- but it stops being optional as soon
+# as the tests move into a tests/ subfolder, which is the normal next step.
+# Verified: with tests in a subfolder and no pyproject.toml, the `pytest`
+# command fails with ModuleNotFoundError. With this line, it passes.
+pythonpath = ["."]
+
+# Only treat files named test_*.py as test files.
+python_files = ["test_*.py"]
