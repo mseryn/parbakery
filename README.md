@@ -3,6 +3,9 @@
 Tools for documenting directories of HPC data files. Point them at a directory
 of CSVs and get back a plain-text description of what is in each one.
 
+Three outputs per CSV: a plain-text description, a par-baked Croissant file,
+and the Markdown rendered from it.
+
 Two purposes:
 
 - **Data quality.** What does each column actually contain? Which columns are
@@ -52,6 +55,9 @@ A single file, printed to the screen:
     parbake_output/
       DIRECTORY_DOCUMENTATION.txt    the index: every file in the directory
       <name>.txt                     one report per CSV
+      parbaked_croissants/
+        <name>.parbaked.json         the start of a Croissant file
+        <name>.parbaked.md           the same, rendered for people
 
 The index lists every file, so nothing is silently left out. Files that are not
 CSVs are listed as "not examined" rather than dropped. For each CSV it records
@@ -105,6 +111,44 @@ numbers are trustworthy.
 number", rather than discarding the range because one value spoiled it.
 
 
+## Par-baked Croissant files
+
+"Par-baked" means machine-generated and not reviewed by anybody. These files are
+the *start* of a Croissant file, not one. Everything in them is either a
+measurement or a placeholder: no field has a description, a data type, a unit or
+a meaning, because those are judgements nobody has made yet.
+
+**They fail Croissant validation on purpose.** A par-baked file that passes
+validation is dangerous, because passing validation is what people check before
+treating a file as done. `conformsTo` names a version that does not exist, which
+`mlcroissant validate` reports as an error.
+
+Fixing one is a ladder rather than a maze -- every error is real work, and the
+file validates exactly when that work is finished. Measured against
+mlcroissant 1.1.0:
+
+| state | errors |
+|---|---|
+| as generated | 2 -- the bad `conformsTo`, and the `@type` it implies |
+| fix `conformsTo` | 17 -- a missing checksum, and 16 fields with no `dataType` |
+| add a checksum | 16 -- the fields with no `dataType` |
+| add the `dataType`s | 0 -- it validates |
+
+The file says it is unreviewed in the dataset description, the RecordSet, the
+FileObject, a `_parbake` block, and every single field description. The
+`_parbake` block also carries the list of what a person still has to do, so the
+list travels with the file.
+
+Nothing is ever written with the name `.croissant.json`. That name is for a file
+someone has finished.
+
+Skip the whole step with `--no-croissant`.
+
+The Markdown is rendered by `croissant_to_md.py`, the same renderer used for
+finished documents, so a par-baked file reads as an unfinished version of the
+real thing.
+
+
 ## Checking a file before sharing it
 
 An ALCF username always contains letters. An anonymised ID is a hash reduced to
@@ -134,7 +178,7 @@ All of them live at the top of `describe_csv.py`, with a comment on each.
 | Setting | Default | What it does |
 |---|---|---|
 | `DEFAULT_PREVIEW_ROWS` | 1000 | rows read by `--preview` |
-| `DEFAULT_BATCH_SIZE` | 500,000 | rows held in memory at once |
+| `DEFAULT_BATCH_SIZE` | 100,000 | rows held in memory at once |
 | `DEFAULT_VALUES_TRACKED` | 1000 | different values counted per column |
 | `DEFAULT_VALUES_SHOWN` | 10 | values listed per column in the report |
 | `SINGLE_VALUE_THRESHOLD` | 0.99 | share of rows for a column to count as constant |
@@ -152,7 +196,7 @@ which flags `MACHINE_NAME` and `QUEUE_NAME` alongside the real ones.
     cd parbake
     pytest
 
-86 tests, about a second. They cover the measurements against files whose
+154 tests, a few seconds. They cover the measurements against files whose
 contents are known, the identifier check, and the directory pass. Three
 behaviours are pinned deliberately because getting them wrong would be quiet
 rather than loud:
@@ -161,11 +205,17 @@ rather than loud:
 - batch size does not change any measurement, so tuning for speed cannot change
   an answer
 - one unreadable file does not stop the rest of the directory
+- reading files in parallel gives byte-identical results to reading them one at
+  a time
+- the par-baked Croissant files fail validation, fail for the *intended* reason,
+  and do validate once the outstanding work is genuinely done
 
 
 ## Limitations
 
 - **CSV only.** Other formats are listed in the index as "not examined".
+- **The Croissant files need a person.** They are a starting point and are
+  useless until someone fills in the types, meanings, licence and caveats.
 - **No subdirectories.** Only the directory you name.
 - **A preview is not the file.** On the Polaris export, the first 1,000 rows
   show 42 columns that look constant; the full file has 29. Previews are

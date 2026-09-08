@@ -278,3 +278,132 @@ def test_a_file_with_nothing_dull_says_nothing(example_directory, output_directo
     )
     assert outcome["empty_columns"] == []
     assert outcome["constant_columns"] == []
+
+
+# --- running several files at once ----------------------------------------
+
+def test_worker_count_never_exceeds_the_number_of_files():
+    """An idle worker still costs a whole Python process and its pandas."""
+    from document_directory import worker_count
+    assert worker_count(8, file_count=3) == 3
+    assert worker_count(8, file_count=20) == 8
+
+
+def test_worker_count_is_at_least_one():
+    from document_directory import worker_count
+    assert worker_count(0, file_count=5) == 1
+    assert worker_count(-4, file_count=5) == 1
+
+
+def test_worker_count_defaults_to_something_sensible():
+    from document_directory import worker_count
+    assert worker_count(None, file_count=100) >= 1
+
+
+def test_running_in_parallel_gives_the_same_answers(example_directory, tmp_path):
+    """Reading files at the same time must not change what is measured."""
+    sequential_out = tmp_path / "sequential"
+    parallel_out = tmp_path / "parallel"
+
+    sequential, _ = document_directory(
+        example_directory, sequential_out, make_settings(), workers=1)
+    parallel, _ = document_directory(
+        example_directory, parallel_out, make_settings(), workers=3)
+
+    assert len(sequential) == len(parallel)
+    for one, other in zip(sequential, parallel):
+        assert one["file"].name == other["file"].name
+        assert one["rows_read"] == other["rows_read"]
+        assert one["column_count"] == other["column_count"]
+        assert one["columns_to_check"] == other["columns_to_check"]
+        assert one["empty_columns"] == other["empty_columns"]
+        assert one["constant_columns"] == other["constant_columns"]
+
+
+def test_results_come_back_in_the_order_the_files_were_listed(example_directory, tmp_path):
+    """Workers finish in whatever order they finish; the report must not."""
+    results, _ = document_directory(
+        example_directory, tmp_path / "out", make_settings(), workers=3)
+    names = [outcome["file"].name for outcome in results]
+    assert names == sorted(names)
+
+
+def test_one_bad_file_does_not_stop_the_others_in_parallel(
+    directory_with_a_broken_file, tmp_path
+):
+    results, _ = document_directory(
+        directory_with_a_broken_file, tmp_path / "out", make_settings(), workers=2)
+    by_name = {outcome["file"].name: outcome for outcome in results}
+
+    assert by_name["broken.csv"]["ok"] is False
+    assert by_name["good.csv"]["ok"] is True
+
+
+# --- par-baked croissants alongside the reports ---------------------------
+
+def test_croissants_go_in_their_own_subdirectory(example_directory, output_directory):
+    """Kept apart so an unreviewed machine-generated file is never mistaken for
+    a finished one sitting beside the reports."""
+    from document_directory import CROISSANT_SUBDIRECTORY
+
+    document_directory(example_directory, output_directory, make_settings())
+    croissants = output_directory / CROISSANT_SUBDIRECTORY
+
+    assert croissants.is_dir()
+    assert sorted(p.name for p in croissants.glob("*.json")) == [
+        "UPPERCASE.parbaked.json", "jobs.parbaked.json", "telemetry.parbaked.json"
+    ]
+
+
+def test_each_croissant_has_a_markdown_beside_it(example_directory, output_directory):
+    from document_directory import CROISSANT_SUBDIRECTORY
+
+    document_directory(example_directory, output_directory, make_settings())
+    croissants = output_directory / CROISSANT_SUBDIRECTORY
+
+    for json_file in croissants.glob("*.parbaked.json"):
+        assert json_file.with_suffix(".md").exists()
+
+
+def test_the_index_points_at_the_croissant(example_directory, output_directory):
+    document_directory(example_directory, output_directory, make_settings())
+    index = (output_directory / INDEX_FILENAME).read_text()
+
+    assert "jobs.parbaked.json" in index
+    assert "NOT REVIEWED" in index
+
+
+def test_nothing_is_ever_named_croissant_json(example_directory, output_directory):
+    """That name is reserved for a file a person has finished."""
+    document_directory(example_directory, output_directory, make_settings())
+    assert list(output_directory.rglob("*.croissant.json")) == []
+
+
+def test_croissants_can_be_skipped(example_directory, output_directory):
+    from document_directory import CROISSANT_SUBDIRECTORY
+
+    settings = make_settings()
+    settings["skip_croissant"] = True
+    results, _ = document_directory(example_directory, output_directory, settings)
+
+    assert not (output_directory / CROISSANT_SUBDIRECTORY).exists()
+    assert all(outcome["croissant_path"] is None for outcome in results)
+
+
+def test_a_croissant_failure_does_not_lose_the_report(example_directory, output_directory,
+                                                      monkeypatch):
+    """The text report is written first and must survive a later problem."""
+    import document_directory as module
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("renderer unavailable")
+
+    monkeypatch.setattr(module, "write_parbaked_croissant", explode)
+    output_directory.mkdir()
+    outcome = describe_one_csv(
+        example_directory / "jobs.csv", output_directory, make_settings()
+    )
+
+    assert outcome["ok"] is True
+    assert outcome["report_path"].exists()
+    assert "renderer unavailable" in outcome["croissant_problem"]

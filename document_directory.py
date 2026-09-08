@@ -26,7 +26,13 @@ Usage:
 import argparse
 import contextlib
 import datetime
+import multiprocessing
+import os
+import queue as queue_module
+import sys
+import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 # Settings live in describe_csv so there is one place to change them.
@@ -38,12 +44,25 @@ from describe_csv import (
     IdentifierCheck,
     describe_csv,
     describe_size,
+    estimate_row_count,
     print_report,
 )
+from parbaked_croissant import render_parbaked_markdown, write_parbaked_croissant
+from progress import ProgressDisplay
 
 CSV_EXTENSIONS = (".csv",)
 DEFAULT_OUTPUT_DIRECTORY = "parbake_output"
 INDEX_FILENAME = "DIRECTORY_DOCUMENTATION.txt"
+
+# Par-baked Croissant files and their Markdown go in their own subdirectory,
+# kept apart from the human-readable reports so nobody mistakes an unreviewed
+# machine-generated file for a finished one.
+CROISSANT_SUBDIRECTORY = "parbaked_croissants"
+
+# One worker per file, each in its own process. Reading a CSV is mostly pandas
+# doing CPU work, so threads would queue up behind each other; separate
+# processes actually run at the same time. More workers than files is waste.
+DEFAULT_WORKER_LIMIT = 8
 
 
 def find_files(directory_to_scan):
@@ -69,7 +88,7 @@ def find_files(directory_to_scan):
     return csv_files, other_files
 
 
-def describe_one_csv(csv_file, output_directory, settings):
+def describe_one_csv(csv_file, output_directory, settings, on_progress=None):
     """Describe one CSV and write its report next to the index.
 
     Returns a dictionary summarising how it went, so the index can say what
@@ -85,6 +104,7 @@ def describe_one_csv(csv_file, output_directory, settings):
             values_tracked=settings["values_tracked"],
             values_shown=settings["values_shown"],
             identifier_check=None if settings["skip_identifier_check"] else IdentifierCheck(),
+            on_progress=on_progress,
         )
     except Exception as problem:
         # One unreadable file must not stop the rest of the directory. The
@@ -105,6 +125,22 @@ def describe_one_csv(csv_file, output_directory, settings):
     with open(report_path, "w", encoding="utf-8") as handle:
         with contextlib.redirect_stdout(handle):
             print_report(result, settings["values_shown"])
+
+    # The par-baked Croissant, and its Markdown rendered by the same tool that
+    # renders reviewed ones. A failure here must not lose the report we just
+    # wrote, so it is recorded rather than raised.
+    croissant_path = markdown_path = None
+    croissant_problem = None
+    if not settings.get("skip_croissant"):
+        try:
+            croissant_directory = output_directory / CROISSANT_SUBDIRECTORY
+            croissant_path = croissant_directory / f"{csv_file.stem}.parbaked.json"
+            document = write_parbaked_croissant(result, croissant_path)
+
+            markdown_path = croissant_directory / f"{csv_file.stem}.parbaked.md"
+            markdown_path.write_text(render_parbaked_markdown(document), encoding="utf-8")
+        except Exception as problem:
+            croissant_problem = f"{type(problem).__name__}: {problem}"
 
     concerns = [
         entry["column_name"]
@@ -130,6 +166,9 @@ def describe_one_csv(csv_file, output_directory, settings):
         "empty_columns": empty_columns,
         "constant_columns": constant_columns,
         "report_path": report_path,
+        "croissant_path": croissant_path,
+        "markdown_path": markdown_path,
+        "croissant_problem": croissant_problem,
     }
 
 
@@ -183,6 +222,14 @@ def build_index(directory_to_scan, results, other_files, settings):
                 f"{', '.join(outcome['constant_columns'])}"
             )
         lines.append(f"      described in {outcome['report_path'].name}")
+        if outcome.get("croissant_path"):
+            lines.append(
+                f"      par-baked croissant: {CROISSANT_SUBDIRECTORY}/"
+                f"{outcome['croissant_path'].name}"
+                f" (+ .md) -- NOT REVIEWED, fails validation on purpose"
+            )
+        if outcome.get("croissant_problem"):
+            lines.append(f"      croissant NOT written: {outcome['croissant_problem']}")
     lines.append("")
 
     lines.append(f"# Other files, not examined ({len(other_files)})")
@@ -197,7 +244,139 @@ def build_index(directory_to_scan, results, other_files, settings):
     return "\n".join(lines)
 
 
-def document_directory(directory_to_scan, output_directory, settings):
+def worker_count(requested, file_count):
+    """How many worker processes to actually start.
+
+    Never more than there are files, because an idle worker still costs the
+    memory of its own Python and pandas.
+    """
+    if requested is None:
+        requested = min(DEFAULT_WORKER_LIMIT, os.cpu_count() or 1)
+    return max(1, min(requested, file_count))
+
+
+def _describe_in_worker(job):
+    """Describe one file. Runs in a worker process.
+
+    Progress goes back to the parent over a queue rather than being printed
+    here: several workers writing to the same terminal at once would interleave
+    into nonsense.
+    """
+    csv_file, output_directory, settings, progress_queue = job
+
+    def report(rows_read, seconds):
+        progress_queue.put(("progress", csv_file.name, rows_read, seconds))
+
+    progress_queue.put(("start", csv_file.name, 0, 0.0))
+    outcome = describe_one_csv(csv_file, output_directory, settings, on_progress=report)
+    progress_queue.put(("finished", csv_file.name, outcome, 0.0))
+    return outcome
+
+
+def _apply_message(display, message):
+    """Fold one message from a worker into the display."""
+    kind, name, payload, seconds = message
+
+    if kind == "start":
+        display.update(name, state="reading")
+    elif kind == "progress":
+        display.update(name, state="reading", rows_read=payload, seconds=seconds)
+    elif kind == "finished":
+        outcome = payload
+        if outcome["ok"]:
+            note = summarise_outcome(outcome)
+            display.update(name, state="done", rows_read=outcome["rows_read"],
+                           seconds=outcome["seconds"], note=note)
+        else:
+            display.update(name, state="failed", note=outcome["problem"][:60])
+
+
+def summarise_outcome(outcome):
+    """The short note shown beside a finished file."""
+    parts = [f"{outcome['column_count']} cols"]
+    carrying_nothing = len(outcome["empty_columns"]) + len(outcome["constant_columns"])
+    if carrying_nothing:
+        parts.append(f"{carrying_nothing} dull")
+    if outcome["columns_to_check"]:
+        parts.append(f"check {len(outcome['columns_to_check'])}")
+    return ", ".join(parts)
+
+
+def run_in_parallel(csv_files, output_directory, settings, workers, display):
+    """Describe every file, several at a time, updating the display as they go."""
+    results_by_name = {}
+
+    # "fork" is the default on Linux but is unsafe here: the manager below runs
+    # a thread, and forking a multi-threaded process can deadlock the child.
+    # Python 3.12 warns about it and 3.14 changes the default. "forkserver"
+    # forks from a clean single-threaded helper, which is both safe and quicker
+    # to start than "spawn"; not every platform has it, so fall back.
+    try:
+        start_method = multiprocessing.get_context("forkserver")
+    except ValueError:
+        start_method = multiprocessing.get_context("spawn")
+
+    # A managed queue can be passed to another process and written to from there.
+    with start_method.Manager() as manager:
+        progress_queue = manager.Queue()
+        jobs = [(csv_file, output_directory, settings, progress_queue)
+                for csv_file in csv_files]
+
+        with ProcessPoolExecutor(max_workers=workers, mp_context=start_method) as pool:
+            futures = [pool.submit(_describe_in_worker, job) for job in jobs]
+
+            while not all(future.done() for future in futures):
+                _drain(progress_queue, display)
+                display.draw()
+                time.sleep(0.05)
+
+            # Anything still in the queue after the last worker finished.
+            _drain(progress_queue, display)
+
+            for future, csv_file in zip(futures, csv_files):
+                try:
+                    results_by_name[csv_file.name] = future.result()
+                except Exception as problem:
+                    # A worker that died rather than returning a failure.
+                    results_by_name[csv_file.name] = {
+                        "file": csv_file, "ok": False,
+                        "problem": f"worker failed: {type(problem).__name__}: {problem}",
+                        "report_path": output_directory / f"{csv_file.stem}.txt",
+                    }
+                    display.update(csv_file.name, state="failed",
+                                   note=f"worker failed: {type(problem).__name__}")
+
+    return [results_by_name[csv_file.name] for csv_file in csv_files]
+
+
+def _drain(progress_queue, display):
+    """Take everything waiting on the queue, without blocking."""
+    while True:
+        try:
+            _apply_message(display, progress_queue.get_nowait())
+        except queue_module.Empty:
+            return
+
+
+def run_one_at_a_time(csv_files, output_directory, settings, display):
+    """The same work in this process. Used with --workers 1, and easier to debug."""
+    results = []
+    for csv_file in csv_files:
+        display.update(csv_file.name, state="reading")
+        display.draw()
+
+        def report(rows_read, seconds, name=csv_file.name):
+            display.update(name, rows_read=rows_read, seconds=seconds)
+            display.draw()
+
+        outcome = describe_one_csv(csv_file, output_directory, settings, on_progress=report)
+        _apply_message(display, ("finished", csv_file.name, outcome, 0.0))
+        display.draw(force=True)
+        results.append(outcome)
+    return results
+
+
+def document_directory(directory_to_scan, output_directory, settings, workers=1):
     """Document every CSV in a directory, and write the index.
 
     Returns (results, other_files).
@@ -205,32 +384,37 @@ def document_directory(directory_to_scan, output_directory, settings):
     output_directory.mkdir(parents=True, exist_ok=True)
     csv_files, other_files = find_files(directory_to_scan)
 
+    active_workers = worker_count(workers, len(csv_files)) if csv_files else 1
     print(f"Scanning {directory_to_scan}")
     print(f"  {len(csv_files)} CSV file(s), {len(other_files)} other file(s)")
     print(f"  reading {settings['scope_description']}")
+    print(f"  {active_workers} worker(s)")
     print()
 
-    results = []
-    for file_number, csv_file in enumerate(csv_files, start=1):
-        size = describe_size(csv_file.stat().st_size)
-        print(f"  [{file_number}/{len(csv_files)}] {csv_file.name}  ({size})", flush=True)
+    if not csv_files:
+        results = []
+    else:
+        # An estimate per file, so the bars have something to fill towards. For
+        # a preview the target is the row limit, which we know exactly.
+        estimated_rows = {}
+        for csv_file in csv_files:
+            estimate = estimate_row_count(csv_file)
+            if settings["preview_rows"] is not None and estimate is not None:
+                estimate = min(estimate, settings["preview_rows"])
+            estimated_rows[csv_file.name] = estimate
 
-        outcome = describe_one_csv(csv_file, output_directory, settings)
-        results.append(outcome)
+        display = ProgressDisplay(
+            [csv_file.name for csv_file in csv_files], estimated_rows, stream=sys.stdout
+        )
+        display.draw(force=True)
 
-
-        if outcome["ok"]:
-            detail = (f"{outcome['rows_read']:,} rows, "
-                      f"{outcome['column_count']} columns, {outcome['seconds']}s")
-            carrying_nothing = len(outcome["empty_columns"]) + len(outcome["constant_columns"])
-            if carrying_nothing:
-                detail += f"  |  {carrying_nothing} column(s) carry no information"
-            if outcome["columns_to_check"]:
-                detail += f"  |  check: {', '.join(outcome['columns_to_check'])}"
-            print(f"        {detail}")
+        if active_workers == 1:
+            results = run_one_at_a_time(csv_files, output_directory, settings, display)
         else:
-            print(f"        COULD NOT READ: {outcome['problem']}")
-        print()
+            results = run_in_parallel(
+                csv_files, output_directory, settings, active_workers, display
+            )
+        display.finish()
 
     index_path = output_directory / INDEX_FILENAME
     index_path.write_text(
@@ -268,6 +452,11 @@ def main():
         help="read every file all the way through. These files can be hundreds "
              "of gigabytes, so this is never the default.",
     )
+    parser.add_argument(
+        "--workers", type=int, default=None, metavar="N",
+        help=f"files to read at the same time, one process each "
+             f"(default: up to {DEFAULT_WORKER_LIMIT}, capped by CPU count and file count)",
+    )
     parser.add_argument("--separator", default=",", help="field separator (default: ,)")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--values-tracked", type=int, default=DEFAULT_VALUES_TRACKED)
@@ -275,6 +464,10 @@ def main():
     parser.add_argument(
         "--no-identifier-check", action="store_true",
         help="skip the check for un-anonymised data",
+    )
+    parser.add_argument(
+        "--no-croissant", action="store_true",
+        help="skip the par-baked Croissant files and their Markdown",
     )
     arguments = parser.parse_args()
 
@@ -290,6 +483,7 @@ def main():
         "values_tracked": arguments.values_tracked,
         "values_shown": arguments.values_shown,
         "skip_identifier_check": arguments.no_identifier_check,
+        "skip_croissant": arguments.no_croissant,
         "scope_description": (
             "every row of every file"
             if preview_rows is None
@@ -297,7 +491,8 @@ def main():
         ),
     }
 
-    document_directory(directory_to_scan, Path(arguments.out), settings)
+    document_directory(directory_to_scan, Path(arguments.out), settings,
+                       workers=arguments.workers)
 
 
 if __name__ == "__main__":

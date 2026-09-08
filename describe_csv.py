@@ -78,8 +78,15 @@ PATH_PROBE_VALUES = 1000
 # land under 1%, while columns with a real shape to them land well above 10%.
 MINIMUM_LISTING_COVERAGE = 0.10
 
-# Rows read at a time during a full scan. Bigger is faster but uses more memory.
-DEFAULT_BATCH_SIZE = 500_000
+# Rows read at a time during a full scan.
+#
+# 100,000 rather than something larger for two reasons. Memory: each worker
+# holds a batch, so eight workers hold eight of them, and a batch of strings is
+# not small. Progress: the row count only moves when a batch finishes, so large
+# batches make a progress bar sit still. Measured on a 236,592-row file, going
+# from 500,000 to 100,000 cost 5% of the reading speed and gave three times the
+# updates.
+DEFAULT_BATCH_SIZE = 100_000
 
 # Rows read by --preview when no number is given.
 DEFAULT_PREVIEW_ROWS = 1000
@@ -412,6 +419,64 @@ class IdentifierCheck:
                 "example": shape["example"],
             })
         return results
+
+
+# Files at or below this size are counted exactly rather than estimated:
+# reading 8 MB to count newlines takes a few hundredths of a second, and
+# sampling a small file gives a worse answer than just reading it.
+EXACT_ROW_COUNT_LIMIT = 8 << 20
+
+
+def estimate_row_count(path, sample_bytes=1 << 16, sample_points=8):
+    """Roughly how many rows are in this file, without reading all of it.
+
+    Takes a few samples from evenly spaced points, works out the average bytes
+    per line across them, and divides the file size by it.
+
+    Sampling only the start is not good enough. The Polaris export has a column
+    holding node lists up to 2,048 characters, and its early rows are longer
+    than its average, which made a start-only estimate 24% low. Spreading the
+    samples brings that to under 3%.
+
+    Only used to put a percentage on a progress bar, so a few percent out does
+    not matter. Returns None if the file is too small or too odd to guess from.
+    """
+    file_size = path.stat().st_size
+    if file_size == 0:
+        return None
+
+    if file_size <= EXACT_ROW_COUNT_LIMIT:
+        with open(path, "rb") as handle:
+            newlines = sum(block.count(b"\n") for block in iter(
+                lambda: handle.read(1 << 20), b""))
+        return max(0, newlines - 1)     # the header is one of them
+
+    total_bytes = 0
+    total_newlines = 0
+    with open(path, "rb") as handle:
+        for point in range(sample_points):
+            offset = int(file_size * point / sample_points)
+            handle.seek(offset)
+            if point > 0:
+                # Landing mid-line would count a partial one, so start at the
+                # next line break.
+                handle.readline()
+            sample = handle.read(sample_bytes)
+            if not sample:
+                continue
+            # Drop the trailing partial line for the same reason.
+            cut = sample.rfind(b"\n")
+            if cut <= 0:
+                continue
+            total_bytes += cut + 1
+            total_newlines += sample.count(b"\n", 0, cut + 1)
+
+    if total_newlines < 2:
+        return None
+
+    average_line_bytes = total_bytes / total_newlines
+    # The header is one of those lines, so take it back off the estimate.
+    return max(1, int(file_size / average_line_bytes) - 1)
 
 
 def read_header(path, separator):
