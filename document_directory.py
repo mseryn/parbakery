@@ -36,28 +36,38 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 # Settings live in describe_csv so there is one place to change them.
-from describe_csv import (
-    DEFAULT_BATCH_SIZE,
+from checkpoints import CheckpointStore
+from describe_csv import describe_csv
+from identifiers import IdentifierCheck
+from reporting import describe_size, print_report
+from settings import (
+    CHECKPOINT_DIRECTORY_NAME,
+    CHECKPOINT_EVERY_ROWS,
+    CSV_SUFFIXES,
     DEFAULT_PREVIEW_ROWS,
     DEFAULT_VALUES_SHOWN,
     DEFAULT_VALUES_TRACKED,
-    IdentifierCheck,
-    describe_csv,
-    describe_size,
-    estimate_row_count,
-    print_report,
 )
+from sources import dataset_stem, estimate_row_count, matched_csv_suffix
 from parbaked_croissant import render_parbaked_markdown, write_parbaked_croissant
-from progress import ProgressDisplay
+from progress import ProgressDisplay, print_key
 
-CSV_EXTENSIONS = (".csv",)
 DEFAULT_OUTPUT_DIRECTORY = "parbake_output"
 INDEX_FILENAME = "DIRECTORY_DOCUMENTATION.txt"
 
-# Par-baked Croissant files and their Markdown go in their own subdirectory,
-# kept apart from the human-readable reports so nobody mistakes an unreviewed
-# machine-generated file for a finished one.
-CROISSANT_SUBDIRECTORY = "parbaked_croissants"
+# Output is sorted by kind, one subdirectory each, so a directory of fifty
+# datasets does not become a heap of a hundred and fifty files. Everything here
+# is par-baked -- unreviewed and machine-generated -- and the names say so.
+#
+# DIRECTORY_DOCUMENTATION.txt stays at the top level: it is the index to all
+# three, and filing it under one of them would be odd.
+CROISSANT_SUBDIRECTORY = "parbaked_croissants"     # .parbaked.json
+MARKDOWN_SUBDIRECTORY = "parbaked_markdown"        # .parbaked.md
+TEXT_SUBDIRECTORY = "parbaked_txt"                 # .txt, the readable reports
+
+OUTPUT_SUBDIRECTORIES = (
+    CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY,
+)
 
 # One worker per file, each in its own process. Reading a CSV is mostly pandas
 # doing CPU work, so threads would queue up behind each other; separate
@@ -80,7 +90,9 @@ def find_files(directory_to_scan):
     for entry in sorted(directory_to_scan.iterdir()):
         if not entry.is_file():
             continue
-        if entry.suffix.lower() in CSV_EXTENSIONS:
+        # Matched on the whole name, not Path.suffix: for "jobs.csv.gz" the
+        # suffix is ".gz", so a suffix check silently skips every compressed file.
+        if matched_csv_suffix(entry):
             csv_files.append(entry)
         else:
             other_files.append(entry)
@@ -88,13 +100,16 @@ def find_files(directory_to_scan):
     return csv_files, other_files
 
 
-def describe_one_csv(csv_file, output_directory, settings, on_progress=None):
+def describe_one_csv(csv_file, output_directory, settings, on_progress=None,
+                     checkpoints=None):
     """Describe one CSV and write its report next to the index.
 
     Returns a dictionary summarising how it went, so the index can say what
     happened to every file -- including the ones that failed.
     """
-    report_path = output_directory / f"{csv_file.stem}.txt"
+    stem = dataset_stem(csv_file)
+    report_path = output_directory / TEXT_SUBDIRECTORY / f"{stem}.txt"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         result = describe_csv(
             csv_file,
@@ -105,10 +120,12 @@ def describe_one_csv(csv_file, output_directory, settings, on_progress=None):
             values_shown=settings["values_shown"],
             identifier_check=None if settings["skip_identifier_check"] else IdentifierCheck(),
             on_progress=on_progress,
+            checkpoints=checkpoints,
         )
     except Exception as problem:
         # One unreadable file must not stop the rest of the directory. The
         # reason is written out in full so it can be diagnosed later.
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(
             f"Could not read {csv_file}\n\n{traceback.format_exc()}",
             encoding="utf-8",
@@ -133,11 +150,13 @@ def describe_one_csv(csv_file, output_directory, settings, on_progress=None):
     croissant_problem = None
     if not settings.get("skip_croissant"):
         try:
-            croissant_directory = output_directory / CROISSANT_SUBDIRECTORY
-            croissant_path = croissant_directory / f"{csv_file.stem}.parbaked.json"
+            croissant_path = (output_directory / CROISSANT_SUBDIRECTORY
+                              / f"{stem}.parbaked.json")
             document = write_parbaked_croissant(result, croissant_path)
 
-            markdown_path = croissant_directory / f"{csv_file.stem}.parbaked.md"
+            markdown_path = (output_directory / MARKDOWN_SUBDIRECTORY
+                             / f"{stem}.parbaked.md")
+            markdown_path.parent.mkdir(parents=True, exist_ok=True)
             markdown_path.write_text(render_parbaked_markdown(document), encoding="utf-8")
         except Exception as problem:
             croissant_problem = f"{type(problem).__name__}: {problem}"
@@ -221,13 +240,18 @@ def build_index(directory_to_scan, results, other_files, settings):
                 f"({len(outcome['constant_columns'])}): "
                 f"{', '.join(outcome['constant_columns'])}"
             )
-        lines.append(f"      described in {outcome['report_path'].name}")
+        lines.append(
+            f"      described in {TEXT_SUBDIRECTORY}/{outcome['report_path'].name}")
         if outcome.get("croissant_path"):
             lines.append(
                 f"      par-baked croissant: {CROISSANT_SUBDIRECTORY}/"
                 f"{outcome['croissant_path'].name}"
-                f" (+ .md) -- NOT REVIEWED, fails validation on purpose"
+                f" -- NOT REVIEWED, fails validation on purpose"
             )
+            if outcome.get("markdown_path"):
+                lines.append(
+                    f"      rendered as: {MARKDOWN_SUBDIRECTORY}/"
+                    f"{outcome['markdown_path'].name}")
         if outcome.get("croissant_problem"):
             lines.append(f"      croissant NOT written: {outcome['croissant_problem']}")
     lines.append("")
@@ -262,13 +286,20 @@ def _describe_in_worker(job):
     here: several workers writing to the same terminal at once would interleave
     into nonsense.
     """
-    csv_file, output_directory, settings, progress_queue = job
+    (csv_file, output_directory, settings, progress_queue,
+     checkpoint_directory, checkpoint_every) = job
 
     def report(rows_read, seconds):
         progress_queue.put(("progress", csv_file.name, rows_read, seconds))
 
     progress_queue.put(("start", csv_file.name, 0, 0.0))
-    outcome = describe_one_csv(csv_file, output_directory, settings, on_progress=report)
+    # Built inside the worker: a CheckpointStore is cheap to make and this keeps
+    # the job tuple to plain data that pickles without fuss.
+    checkpoints = CheckpointStore(checkpoint_directory,
+                                  enabled=checkpoint_directory is not None,
+                                  every_rows=checkpoint_every)
+    outcome = describe_one_csv(csv_file, output_directory, settings,
+                               on_progress=report, checkpoints=checkpoints)
     progress_queue.put(("finished", csv_file.name, outcome, 0.0))
     return outcome
 
@@ -294,15 +325,16 @@ def _apply_message(display, message):
 def summarise_outcome(outcome):
     """The short note shown beside a finished file."""
     parts = [f"{outcome['column_count']} cols"]
-    carrying_nothing = len(outcome["empty_columns"]) + len(outcome["constant_columns"])
-    if carrying_nothing:
-        parts.append(f"{carrying_nothing} dull")
+    constant = len(outcome["empty_columns"]) + len(outcome["constant_columns"])
+    if constant:
+        parts.append(f"{constant} constant")
     if outcome["columns_to_check"]:
         parts.append(f"check {len(outcome['columns_to_check'])}")
     return ", ".join(parts)
 
 
-def run_in_parallel(csv_files, output_directory, settings, workers, display):
+def run_in_parallel(csv_files, output_directory, settings, workers, display,
+                    checkpoint_directory=None, checkpoint_every=CHECKPOINT_EVERY_ROWS):
     """Describe every file, several at a time, updating the display as they go."""
     results_by_name = {}
 
@@ -319,7 +351,8 @@ def run_in_parallel(csv_files, output_directory, settings, workers, display):
     # A managed queue can be passed to another process and written to from there.
     with start_method.Manager() as manager:
         progress_queue = manager.Queue()
-        jobs = [(csv_file, output_directory, settings, progress_queue)
+        jobs = [(csv_file, output_directory, settings, progress_queue,
+                 checkpoint_directory, checkpoint_every)
                 for csv_file in csv_files]
 
         with ProcessPoolExecutor(max_workers=workers, mp_context=start_method) as pool:
@@ -341,7 +374,7 @@ def run_in_parallel(csv_files, output_directory, settings, workers, display):
                     results_by_name[csv_file.name] = {
                         "file": csv_file, "ok": False,
                         "problem": f"worker failed: {type(problem).__name__}: {problem}",
-                        "report_path": output_directory / f"{csv_file.stem}.txt",
+                        "report_path": output_directory / TEXT_SUBDIRECTORY / f"{dataset_stem(csv_file)}.txt",
                     }
                     display.update(csv_file.name, state="failed",
                                    note=f"worker failed: {type(problem).__name__}")
@@ -358,7 +391,9 @@ def _drain(progress_queue, display):
             return
 
 
-def run_one_at_a_time(csv_files, output_directory, settings, display):
+def run_one_at_a_time(csv_files, output_directory, settings, display,
+                      checkpoint_directory=None,
+                      checkpoint_every=CHECKPOINT_EVERY_ROWS):
     """The same work in this process. Used with --workers 1, and easier to debug."""
     results = []
     for csv_file in csv_files:
@@ -369,14 +404,20 @@ def run_one_at_a_time(csv_files, output_directory, settings, display):
             display.update(name, rows_read=rows_read, seconds=seconds)
             display.draw()
 
-        outcome = describe_one_csv(csv_file, output_directory, settings, on_progress=report)
+        checkpoints = CheckpointStore(checkpoint_directory,
+                                      enabled=checkpoint_directory is not None,
+                                      every_rows=checkpoint_every)
+        outcome = describe_one_csv(csv_file, output_directory, settings,
+                                   on_progress=report, checkpoints=checkpoints)
         _apply_message(display, ("finished", csv_file.name, outcome, 0.0))
         display.draw(force=True)
         results.append(outcome)
     return results
 
 
-def document_directory(directory_to_scan, output_directory, settings, workers=1):
+def document_directory(directory_to_scan, output_directory, settings, workers=1,
+                       checkpoint_directory=None,
+                       checkpoint_every=CHECKPOINT_EVERY_ROWS):
     """Document every CSV in a directory, and write the index.
 
     Returns (results, other_files).
@@ -389,6 +430,15 @@ def document_directory(directory_to_scan, output_directory, settings, workers=1)
     print(f"  {len(csv_files)} CSV file(s), {len(other_files)} other file(s)")
     print(f"  reading {settings['scope_description']}")
     print(f"  {active_workers} worker(s)")
+    if checkpoint_directory:
+        waiting = CheckpointStore(checkpoint_directory).outstanding()
+        if waiting:
+            print(f"  {len(waiting)} checkpoint(s) from an earlier run -- those "
+                  "files will carry on rather than start again")
+    else:
+        print("  checkpointing off")
+    print()
+    print_key()
     print()
 
     if not csv_files:
@@ -404,15 +454,19 @@ def document_directory(directory_to_scan, output_directory, settings, workers=1)
             estimated_rows[csv_file.name] = estimate
 
         display = ProgressDisplay(
-            [csv_file.name for csv_file in csv_files], estimated_rows, stream=sys.stdout
+            [csv_file.name for csv_file in csv_files], estimated_rows,
+            stream=sys.stdout, workers=active_workers,
         )
         display.draw(force=True)
 
         if active_workers == 1:
-            results = run_one_at_a_time(csv_files, output_directory, settings, display)
+            results = run_one_at_a_time(csv_files, output_directory, settings,
+                                        display, checkpoint_directory,
+                                        checkpoint_every)
         else:
             results = run_in_parallel(
-                csv_files, output_directory, settings, active_workers, display
+                csv_files, output_directory, settings, active_workers, display,
+                checkpoint_directory, checkpoint_every,
             )
         display.finish()
 
@@ -422,6 +476,13 @@ def document_directory(directory_to_scan, output_directory, settings, workers=1)
     )
 
     failed = [outcome for outcome in results if not outcome["ok"]]
+
+    # Only clear the checkpoints if every file got through. If anything failed,
+    # leaving them means the next run can carry on rather than start again.
+    if checkpoint_directory and not failed:
+        if CheckpointStore(checkpoint_directory).clear():
+            pass                      # nothing left to resume, nothing to say
+
     print()
     print(f"  {len(results) - len(failed)} of {len(results)} CSV file(s) described")
     if failed:
@@ -458,7 +519,12 @@ def main():
              f"(default: up to {DEFAULT_WORKER_LIMIT}, capped by CPU count and file count)",
     )
     parser.add_argument("--separator", default=",", help="field separator (default: ,)")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument(
+        "--batch-size", type=int, default=None, metavar="N",
+        help="rows read at a time per worker. By default this is worked out "
+             "from how wide each file is, so memory stays about the same "
+             "whatever the shape. Lower it if a run is being killed.",
+    )
     parser.add_argument("--values-tracked", type=int, default=DEFAULT_VALUES_TRACKED)
     parser.add_argument("--values-shown", type=int, default=DEFAULT_VALUES_SHOWN)
     parser.add_argument(
@@ -468,6 +534,21 @@ def main():
     parser.add_argument(
         "--no-croissant", action="store_true",
         help="skip the par-baked Croissant files and their Markdown",
+    )
+    parser.add_argument(
+        "--no-checkpoints", action="store_true",
+        help="do not save progress. A killed run then starts again from the "
+             "beginning rather than carrying on.",
+    )
+    parser.add_argument(
+        "--checkpoint-every", type=int, default=CHECKPOINT_EVERY_ROWS, metavar="N",
+        help=f"rows between saves (default {CHECKPOINT_EVERY_ROWS:,}). Lower it "
+             "to lose less when a run is killed, at the cost of writing more often.",
+    )
+    parser.add_argument(
+        "--checkpoint-dir", metavar="DIR", default=None,
+        help=f"where progress is saved (default: <out>/{CHECKPOINT_DIRECTORY_NAME}). "
+             "Removed when every file has been described.",
     )
     arguments = parser.parse_args()
 
@@ -491,8 +572,16 @@ def main():
         ),
     }
 
-    document_directory(directory_to_scan, Path(arguments.out), settings,
-                       workers=arguments.workers)
+    output_directory = Path(arguments.out)
+    checkpoint_directory = None
+    if not arguments.no_checkpoints:
+        checkpoint_directory = Path(
+            arguments.checkpoint_dir or output_directory / CHECKPOINT_DIRECTORY_NAME)
+
+    document_directory(directory_to_scan, output_directory, settings,
+                       workers=arguments.workers,
+                       checkpoint_directory=checkpoint_directory,
+                       checkpoint_every=arguments.checkpoint_every)
 
 
 if __name__ == "__main__":

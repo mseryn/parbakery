@@ -11,9 +11,12 @@ expected answers can be checked by eye against the file rather than taken on
 trust.
 """
 
+from pathlib import Path
+
 import pytest
 
-from describe_csv import ColumnSummary, describe_csv
+from describe_csv import describe_csv
+from measuring import ColumnSummary
 
 
 # The test file. Five rows, chosen so every answer is countable by hand.
@@ -346,3 +349,106 @@ def test_a_mostly_empty_column_is_neither_empty_nor_constant(described):
     assert summary.is_all_empty is False
     assert summary.holds_one_value is False
     assert summary.single_value_share == 0.2
+
+
+# --- compressed files -----------------------------------------------------
+
+import bz2 as _bz2      # noqa: E402
+import gzip as _gzip    # noqa: E402
+import lzma as _lzma    # noqa: E402
+
+from sources import (  # noqa: E402
+    compression_of,
+    dataset_stem,
+    estimate_row_count,
+    matched_csv_suffix,
+)
+
+
+@pytest.fixture
+def compressed_copies(tmp_path):
+    """The same CSV, stored four ways."""
+    body = EXAMPLE_CSV.encode()
+    paths = {"plain": tmp_path / "example.csv"}
+    paths["plain"].write_bytes(body)
+    paths["gz"] = tmp_path / "example.csv.gz"
+    paths["gz"].write_bytes(_gzip.compress(body))
+    paths["bz2"] = tmp_path / "example.csv.bz2"
+    paths["bz2"].write_bytes(_bz2.compress(body))
+    paths["xz"] = tmp_path / "example.csv.xz"
+    paths["xz"].write_bytes(_lzma.compress(body))
+    return paths
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("jobs.csv", ".csv"),
+    ("jobs.csv.gz", ".csv.gz"),
+    ("jobs.csv.bz2", ".csv.bz2"),
+    ("jobs.csv.xz", ".csv.xz"),
+    ("jobs.CSV.GZ", ".csv.gz"),
+    ("notes.txt", ""),
+    ("archive.csv.zip", ""),      # a zip can hold several files; not our call
+])
+def test_which_files_count_as_csv(name, expected):
+    """Path.suffix says ".gz" for a compressed CSV, which is how every one of
+    them was silently skipped."""
+    assert matched_csv_suffix(Path(name)) == expected
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("jobs.csv", "jobs"),
+    ("jobs.csv.gz", "jobs"),
+    ("aurora_2026-01.csv.bz2", "aurora_2026-01"),
+    ("notes.txt", "notes"),
+])
+def test_the_stem_drops_both_extensions(name, expected):
+    """Otherwise a report for jobs.csv.gz is called jobs.csv.txt."""
+    assert dataset_stem(Path(name)) == expected
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("jobs.csv", None), ("jobs.csv.gz", "gzip"),
+    ("jobs.csv.bz2", "bz2"), ("jobs.csv.xz", "xz"),
+])
+def test_compression_is_recognised(name, expected):
+    assert compression_of(Path(name)) == expected
+
+
+@pytest.mark.parametrize("kind", ["gz", "bz2", "xz"])
+def test_a_compressed_file_reads(compressed_copies, kind):
+    assert describe_csv(compressed_copies[kind])["file"]["rows_read"] == 5
+
+
+@pytest.mark.parametrize("kind", ["gz", "bz2", "xz"])
+def test_compression_changes_nothing_that_is_measured(compressed_copies, kind):
+    """The same data stored two ways must describe identically, or the format
+    a file happens to arrive in would change the answers."""
+    plain = describe_csv(compressed_copies["plain"])["columns"]
+    assert describe_csv(compressed_copies[kind])["columns"] == plain
+
+
+def test_the_recorded_size_is_the_size_on_disk(compressed_copies):
+    """Compressed bytes, which is what the file actually occupies."""
+    described = describe_csv(compressed_copies["gz"])["file"]
+    assert described["size_in_bytes"] == compressed_copies["gz"].stat().st_size
+
+
+@pytest.mark.parametrize("kind", ["gz", "bz2", "xz"])
+def test_row_estimates_do_not_count_compressed_bytes(tmp_path, kind):
+    """Counting newlines in compressed bytes measures nothing. On a real file
+    that gave 269 against an actual 1,999."""
+    body = ("v\n" + "\n".join(f"value{n}" for n in range(20_000)) + "\n").encode()
+    compress = {"gz": _gzip.compress, "bz2": _bz2.compress, "xz": _lzma.compress}[kind]
+    path = tmp_path / f"big.csv.{kind}"
+    path.write_bytes(compress(body))
+
+    estimate = estimate_row_count(path)
+    assert estimate is not None
+    assert abs(estimate - 20_000) / 20_000 < 0.10      # within 10% is fine for a bar
+
+
+def test_a_truncated_compressed_file_costs_a_bar_not_a_run(tmp_path):
+    """A broken file should not take the whole run down for want of a percentage."""
+    path = tmp_path / "broken.csv.gz"
+    path.write_bytes(_gzip.compress(b"v\n1\n2\n")[:12])
+    assert estimate_row_count(path) is None

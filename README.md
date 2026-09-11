@@ -53,11 +53,17 @@ A single file, printed to the screen:
 ## What you get
 
     parbake_output/
-      DIRECTORY_DOCUMENTATION.txt    the index: every file in the directory
-      <name>.txt                     one report per CSV
+      DIRECTORY_DOCUMENTATION.txt      the index: every file in the directory
+      parbaked_txt/
+        <name>.txt                     one readable report per CSV
       parbaked_croissants/
-        <name>.parbaked.json         the start of a Croissant file
-        <name>.parbaked.md           the same, rendered for people
+        <name>.parbaked.json           the start of a Croissant file
+      parbaked_markdown/
+        <name>.parbaked.md             the same, rendered for people
+
+One folder per kind, so a directory of fifty datasets does not become a heap of
+a hundred and fifty files. The index stays at the top level, because it is the
+index to all three.
 
 The index lists every file, so nothing is silently left out. Files that are not
 CSVs are listed as "not examined" rather than dropped. For each CSV it records
@@ -149,6 +155,47 @@ finished documents, so a par-baked file reads as an unfinished version of the
 real thing.
 
 
+## Being killed, and carrying on
+
+Long reads get killed -- by the out-of-memory killer, by a scheduler, by a
+closed laptop. Progress is saved every `--checkpoint-every` rows (default
+1,000,000), and the next run carries on rather than starting again.
+
+    python3 document_directory.py ../data --full           # saves progress
+    python3 document_directory.py ../data --full           # carries on
+    python3 document_directory.py ../data --full --no-checkpoints
+
+Checkpoints live in `<out>/.parbake_checkpoints/` and the whole directory is
+removed once every file has been described. If anything failed, they are kept so
+the next run can still use them.
+
+A resumed read gives **exactly** what an uninterrupted one would, including the
+columns that hit the value-tracking cap. That is because a checkpoint holds the
+whole accumulator and carries on adding to it, rather than merging two separate
+ones -- which is also why the same trick cannot be used to split one file across
+several workers.
+
+A checkpoint is ignored, and the file read from the start, if the data has
+changed (size or modification time), if the settings that affect measurements
+have changed, or if it was written by a different version. Batch size is
+deliberately not one of those: it cannot change a measurement, and lowering it
+is the usual response to being killed.
+
+### If you are being killed for memory
+
+Checkpointing is recovery, not prevention. Memory is dominated by the batch, so
+the levers are:
+
+| | |
+|---|---|
+| `--batch-size N` | rows held at once. By default worked out from how wide the file is |
+| `--workers N` | each worker holds its own batch |
+
+Measured on a 66-column file, one worker: the batch size is chosen to hold about
+a million cells, which came to **175 MB**. A fixed 100,000 rows would have been
+**426 MB**, and eight workers of those is 3.4 GB.
+
+
 ## Checking a file before sharing it
 
 An ALCF username always contains letters. An anonymised ID is a hash reduced to
@@ -178,7 +225,8 @@ All of them live at the top of `describe_csv.py`, with a comment on each.
 | Setting | Default | What it does |
 |---|---|---|
 | `DEFAULT_PREVIEW_ROWS` | 1000 | rows read by `--preview` |
-| `DEFAULT_BATCH_SIZE` | 100,000 | rows held in memory at once |
+| `CELL_BUDGET_PER_BATCH` | 1,000,000 | cells held at once; the row count follows from the file's width |
+| `CHECKPOINT_EVERY_ROWS` | 1,000,000 | rows between saves |
 | `DEFAULT_VALUES_TRACKED` | 1000 | different values counted per column |
 | `DEFAULT_VALUES_SHOWN` | 10 | values listed per column in the report |
 | `SINGLE_VALUE_THRESHOLD` | 0.99 | share of rows for a column to count as constant |
@@ -196,7 +244,7 @@ which flags `MACHINE_NAME` and `QUEUE_NAME` alongside the real ones.
     cd parbake
     pytest
 
-154 tests, a few seconds. They cover the measurements against files whose
+223 tests, a few seconds. They cover the measurements against files whose
 contents are known, the identifier check, and the directory pass. Three
 behaviours are pinned deliberately because getting them wrong would be quiet
 rather than loud:
@@ -209,11 +257,14 @@ rather than loud:
   a time
 - the par-baked Croissant files fail validation, fail for the *intended* reason,
   and do validate once the outstanding work is genuinely done
+- an interrupted read resumes to a byte-identical result, including the columns
+  that hit the value cap
+- clearing checkpoints never deletes a file it did not write
 
 
 ## Limitations
 
-- **CSV only.** Other formats are listed in the index as "not examined".
+- **CSV only**, plain or compressed (`.csv`, `.csv.gz`, `.csv.bz2`, `.csv.xz`). `.zip` is not read: an archive can hold several files, and choosing one is a judgement. Everything else is listed in the index as "not examined".
 - **The Croissant files need a person.** They are a starting point and are
   useless until someone fills in the types, meanings, licence and caveats.
 - **No subdirectories.** Only the directory you name.

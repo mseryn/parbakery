@@ -10,8 +10,7 @@ it, and checks the reports say what they should.
 
 import pytest
 
-from describe_csv import (
-    DEFAULT_BATCH_SIZE,
+from settings import (
     DEFAULT_PREVIEW_ROWS,
     DEFAULT_VALUES_SHOWN,
     DEFAULT_VALUES_TRACKED,
@@ -30,7 +29,7 @@ def make_settings(preview_rows=DEFAULT_PREVIEW_ROWS, skip_identifier_check=False
     return {
         "separator": ",",
         "preview_rows": preview_rows,
-        "batch_size": DEFAULT_BATCH_SIZE,
+        "batch_size": None,          # worked out from the file width
         "values_tracked": DEFAULT_VALUES_TRACKED,
         "values_shown": DEFAULT_VALUES_SHOWN,
         "skip_identifier_check": skip_identifier_check,
@@ -355,14 +354,85 @@ def test_croissants_go_in_their_own_subdirectory(example_directory, output_direc
     ]
 
 
-def test_each_croissant_has_a_markdown_beside_it(example_directory, output_directory):
-    from document_directory import CROISSANT_SUBDIRECTORY
+def test_each_croissant_has_a_markdown_in_the_markdown_folder(
+    example_directory, output_directory
+):
+    from document_directory import CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY
 
     document_directory(example_directory, output_directory, make_settings())
     croissants = output_directory / CROISSANT_SUBDIRECTORY
+    markdown = output_directory / MARKDOWN_SUBDIRECTORY
 
-    for json_file in croissants.glob("*.parbaked.json"):
-        assert json_file.with_suffix(".md").exists()
+    json_files = sorted(croissants.glob("*.parbaked.json"))
+    assert json_files
+    for json_file in json_files:
+        assert (markdown / f"{json_file.name[:-len('.json')]}.md").exists()
+
+
+def test_output_is_sorted_into_three_folders(example_directory, output_directory):
+    """One folder per kind, so fifty datasets do not become a heap of files."""
+    from document_directory import OUTPUT_SUBDIRECTORIES
+
+    document_directory(example_directory, output_directory, make_settings())
+
+    for name in OUTPUT_SUBDIRECTORIES:
+        assert (output_directory / name).is_dir(), f"{name} was not created"
+
+
+def test_each_folder_holds_only_its_own_kind(example_directory, output_directory):
+    from document_directory import (
+        CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY,
+    )
+
+    document_directory(example_directory, output_directory, make_settings())
+
+    for folder, suffix in (
+        (CROISSANT_SUBDIRECTORY, ".json"),
+        (MARKDOWN_SUBDIRECTORY, ".md"),
+        (TEXT_SUBDIRECTORY, ".txt"),
+    ):
+        written = list((output_directory / folder).iterdir())
+        assert written, f"{folder} is empty"
+        assert all(path.suffix == suffix for path in written), \
+            f"{folder} holds something other than {suffix}"
+
+
+def test_the_index_stays_at_the_top_level(example_directory, output_directory):
+    """It is the index to all three folders, so filing it under one would be odd."""
+    from document_directory import OUTPUT_SUBDIRECTORIES
+
+    document_directory(example_directory, output_directory, make_settings())
+
+    assert (output_directory / INDEX_FILENAME).is_file()
+    for name in OUTPUT_SUBDIRECTORIES:
+        assert not (output_directory / name / INDEX_FILENAME).exists()
+
+
+def test_the_index_says_which_folder_each_file_is_in(example_directory, output_directory):
+    from document_directory import (
+        CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY,
+    )
+
+    document_directory(example_directory, output_directory, make_settings())
+    index = (output_directory / INDEX_FILENAME).read_text()
+
+    for folder in (CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY):
+        assert f"{folder}/" in index
+
+
+def test_a_failed_file_still_gets_its_report_in_the_text_folder(
+    directory_with_a_broken_file, output_directory
+):
+    """The traceback has to land somewhere findable, even for a file that failed
+    before any folder was made for it."""
+    from document_directory import TEXT_SUBDIRECTORY
+
+    results, _ = document_directory(
+        directory_with_a_broken_file, output_directory, make_settings())
+    broken = next(o for o in results if o["file"].name == "broken.csv")
+
+    assert broken["report_path"].parent.name == TEXT_SUBDIRECTORY
+    assert broken["report_path"].is_file()
 
 
 def test_the_index_points_at_the_croissant(example_directory, output_directory):

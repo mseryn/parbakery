@@ -11,7 +11,8 @@ Run with:
 
 import pandas
 
-from describe_csv import IdentifierCheck, describe_csv
+from describe_csv import describe_csv
+from identifiers import IdentifierCheck
 
 
 # --- which columns get looked at ------------------------------------------

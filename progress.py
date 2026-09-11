@@ -16,6 +16,8 @@ import shutil
 import sys
 import time
 
+import resources
+
 BAR_WIDTH = 20
 FILLED = "#"
 EMPTY = "-"
@@ -49,6 +51,25 @@ def shorten_name(name, limit):
     if len(name) <= limit:
         return name
     return "..." + name[-(limit - 3):]
+
+
+# What each word in the display means. The progress line is squeezed to fit
+# beside a bar, so every word in it is an abbreviation of something; spelling
+# them out once costs five lines and saves everyone guessing.
+DISPLAY_KEY = (
+    "rows      rows checked",
+    "cols      columns checked",
+    "time      time elapsed",
+    "constant  flagged columns holding the same value 99%+ of the time",
+    "check     flagged for an anonymity check",
+)
+
+
+def print_key(say=print):
+    """Say what each word in the display means."""
+    say("  key")
+    for line in DISPLAY_KEY:
+        say(f"    {line}")
 
 
 class FileProgress:
@@ -115,8 +136,13 @@ class FileProgress:
 class ProgressDisplay:
     """Draws one line per file, in place when the terminal allows it."""
 
-    def __init__(self, names, estimated_rows=None, stream=None):
+    def __init__(self, names, estimated_rows=None, stream=None,
+                 show_resources=True, workers=None):
         self.stream = stream or sys.stderr
+        self.show_resources = show_resources
+        self.workers = workers
+        self.resource_text = ""
+        self.resources_read_at = 0.0
         # Redrawing needs a terminal. Anything else gets plain lines.
         self.can_redraw = hasattr(self.stream, "isatty") and self.stream.isatty()
         self.files = [
@@ -149,7 +175,18 @@ class ProgressDisplay:
             return
         self.last_drawn_at = now
 
-        lines = [
+        lines = []
+        if self.show_resources:
+            # Refreshed on its own slower clock: it is context, not progress,
+            # and reading /proc for every worker on every frame would be work
+            # spent measuring instead of working.
+            if now - self.resources_read_at >= resources.REFRESH_SECONDS or not self.resource_text:
+                self.resource_text = resources.resource_line(workers=self.workers)
+                self.resources_read_at = now
+            lines.append(self.resource_text)
+            lines.append("")
+
+        lines += [
             progress.line(number, len(self.files), self.name_width)
             for number, progress in enumerate(self.files, start=1)
         ]

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from describe_csv import describe_csv
+from measuring import ColumnSummary  # noqa: F401
 from parbaked_croissant import (
     BANNER,
     FIELD_PLACEHOLDER,

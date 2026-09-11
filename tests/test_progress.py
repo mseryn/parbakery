@@ -121,7 +121,8 @@ class FakeTerminal(io.StringIO):
 
 def test_the_display_has_one_line_per_file():
     stream = FakeTerminal()
-    display = ProgressDisplay(["a.csv", "b.csv", "c.csv"], stream=stream)
+    display = ProgressDisplay(["a.csv", "b.csv", "c.csv"], stream=stream,
+                              show_resources=False)
     display.draw(force=True)
 
     written = stream.getvalue()
@@ -134,7 +135,8 @@ def test_redrawing_moves_the_cursor_back_up_over_the_last_frame():
     """Otherwise each refresh would append a new block and the terminal would
     scroll away."""
     stream = FakeTerminal()
-    display = ProgressDisplay(["a.csv", "b.csv"], stream=stream)
+    display = ProgressDisplay(["a.csv", "b.csv"], stream=stream,
+                              show_resources=False)
 
     display.draw(force=True)
     first_frame = stream.getvalue()
@@ -142,6 +144,18 @@ def test_redrawing_moves_the_cursor_back_up_over_the_last_frame():
 
     display.draw(force=True)
     assert "\x1b[2A" in stream.getvalue()      # up two lines, one per file
+
+
+def test_redrawing_covers_the_resource_line_too():
+    """The frame is taller with the resource header, and the cursor has to go
+    back over all of it or the display walks down the screen."""
+    stream = FakeTerminal()
+    display = ProgressDisplay(["a.csv", "b.csv"], stream=stream,
+                              show_resources=True)
+
+    display.draw(force=True)
+    display.draw(force=True)
+    assert "\x1b[4A" in stream.getvalue()      # 2 files + resource line + blank
 
 
 def test_drawing_is_rate_limited():
@@ -206,3 +220,111 @@ def test_a_non_terminal_reports_each_file_once_when_it_finishes():
 
     display.draw(force=True)                  # and not a second time
     assert stream.getvalue().count("done") == 1
+
+
+# --- the key --------------------------------------------------------------
+
+def test_the_key_explains_every_word_the_display_uses():
+    """A word in the display with no entry in the key is jargon nobody can look
+    up. "dull" got shipped that way, and this is the test that would have caught it."""
+    from progress import DISPLAY_KEY
+
+    explained = {line.split()[0] for line in DISPLAY_KEY}
+    assert {"rows", "cols", "time", "constant", "check"} <= explained
+
+
+def test_the_key_prints_each_term_with_its_meaning():
+    said = []
+    from progress import print_key
+    print_key(said.append)
+
+    text = "\n".join(said)
+    assert "key" in text
+    for term in ("rows", "cols", "time", "constant", "check"):
+        assert term in text
+
+
+# --- the resource line ----------------------------------------------------
+
+def test_the_resource_line_reports_workers_memory_and_cpu():
+    from resources import resource_line, snapshot
+
+    line = resource_line(snapshot(), workers=4)
+    assert "4 worker(s)" in line
+    assert "in use" in line
+    assert "CPU used" in line
+
+
+def test_the_worker_count_is_told_not_guessed():
+    """The tree also holds a forkserver and a manager, which are not workers.
+    Counting processes and calling them workers reported 2 for a 4-worker run."""
+    from resources import resource_line, snapshot
+
+    reading = snapshot()
+    assert "4 worker(s)" in resource_line(reading, workers=4)
+    assert "process(es)" in resource_line(reading)      # honest when not told
+
+
+def test_the_resource_line_can_be_turned_off():
+    stream = FakeTerminal()
+    display = ProgressDisplay(["a.csv"], stream=stream, show_resources=False)
+    display.draw(force=True)
+    assert "worker(s) running" not in stream.getvalue()
+
+
+def test_the_resource_line_appears_above_the_bars():
+    stream = FakeTerminal()
+    display = ProgressDisplay(["a.csv"], stream=stream, show_resources=True,
+                              workers=3)
+    display.draw(force=True)
+
+    lines = [l for l in stream.getvalue().splitlines() if l.strip()]
+    assert "3 worker(s)" in lines[0]
+    assert "a.csv" in lines[1]
+
+
+def test_reading_resources_for_a_process_that_has_gone_returns_nothing():
+    """Workers come and go between listing them and reading them."""
+    from resources import cpu_seconds, memory_bytes
+
+    gone = 999_999_999
+    assert memory_bytes(gone) is None
+    assert cpu_seconds(gone) is None
+
+
+def test_a_snapshot_counts_memory_across_the_tree():
+    from resources import snapshot
+
+    reading = snapshot()
+    assert reading["processes"] >= 1
+    assert reading["memory_bytes"] > 0
+
+
+def test_the_tree_reaches_grandchildren_not_just_children():
+    """Workers are started through a forkserver, so they are grandchildren.
+    Walking one level found the forkserver and the manager -- two small idle
+    processes -- and missed every worker, reporting 137 MB for a run using 740.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from resources import process_tree
+
+    # a child that itself has a child, mirroring main -> forkserver -> worker
+    grandparent = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess,sys,time;"
+         "c=subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)']);"
+         "time.sleep(5)"]
+    )
+    try:
+        time.sleep(1.5)
+        found = process_tree(os.getpid())
+        # our own pid, the child, and the grandchild
+        assert grandparent.pid in found, "did not find the direct child"
+        assert len(found) >= 3, f"grandchild missing; tree was {found}"
+    finally:
+        grandparent.kill()
+        grandparent.wait()

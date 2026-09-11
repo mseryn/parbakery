@@ -38,6 +38,8 @@ person has finished.
 import datetime
 import json
 
+from sources import dataset_stem
+
 # The version string that makes the file fail. Not a real Croissant version,
 # and it is meant to be read by people as much as by validators.
 PARBAKED_CONFORMS_TO = "http://mlcommons.org/croissant/PARBAKED-DO-NOT-SUBMIT"
@@ -73,14 +75,20 @@ CROISSANT_CONTEXT = {
     "conformsTo": "dct:conformsTo",
     "cr": "http://mlcommons.org/croissant/",
     "data": {"@id": "cr:data", "@type": "@json"},
+    "dataBiases": "rai:dataBiases",
+    "dataCollectionType": "rai:dataCollectionType",
+    "dataSocialImpact": "rai:dataSocialImpact",
     "dataType": {"@id": "cr:dataType", "@type": "@vocab"},
     "dct": "http://purl.org/dc/terms/",
+    "equivalentProperty": "cr:equivalentProperty",
+    "examples": {"@id": "cr:examples", "@type": "@json"},
     "extract": "cr:extract",
     "field": "cr:field",
     "fileObject": "cr:fileObject",
     "fileProperty": "cr:fileProperty",
     "fileSet": "cr:fileSet",
     "format": "cr:format",
+    "hasSyntheticData": "rai:hasSyntheticData",
     "includes": "cr:includes",
     "isLiveDataset": "cr:isLiveDataset",
     "jsonPath": "cr:jsonPath",
@@ -94,6 +102,7 @@ CROISSANT_CONTEXT = {
     "regex": "cr:regex",
     "repeated": "cr:repeated",
     "replace": "cr:replace",
+    "samplingRate": "cr:samplingRate",
     "sc": "https://schema.org/",
     "separator": "cr:separator",
     "source": "cr:source",
@@ -110,7 +119,8 @@ def build_parbaked_croissant(result, generator_version="parbake 0.1"):
     """
     file_details = result["file"]
     filename = file_details["path"].rsplit("/", 1)[-1]
-    dataset_name = filename.rsplit(".", 1)[0]
+    # Strips ".csv.gz" as well as ".csv"; rsplit(".", 1) would leave ".csv" on.
+    dataset_name = dataset_stem(filename)
 
     # cr:FileObject, not sc:. See the note at the top of this file: this costs
     # one extra error while par-baked and saves 35 confusing ones later.
