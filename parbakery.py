@@ -17,10 +17,10 @@ a full scan is something you ask for, never something that happens because you
 pointed the tool at a directory and pressed enter.
 
 Usage:
-    python3 document_directory.py ../copies_of_data
-    python3 document_directory.py ../copies_of_data --preview 10000
-    python3 document_directory.py ../copies_of_data --full
-    python3 document_directory.py ../copies_of_data --out somewhere_else
+    python3 parbakery.py ../copies_of_data
+    python3 parbakery.py ../copies_of_data --preview 10000
+    python3 parbakery.py ../copies_of_data --full
+    python3 parbakery.py ../copies_of_data --out somewhere_else
 """
 
 import argparse

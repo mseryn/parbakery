@@ -42,7 +42,7 @@ make that inescapable — see §7.
 Two entry points, sharing one measurement engine.
 
 ```
-document_directory.py          scan a directory, describe every CSV in it
+parbakery.py                   scan a directory, describe every CSV in it
   └─ describe_csv.py           measure one CSV        ← also runs standalone
        ├─ IdentifierCheck      un-anonymised data check
        └─ ColumnSummary        per-column accumulators
@@ -52,7 +52,7 @@ document_directory.py          scan a directory, describe every CSV in it
 ```
 
 `describe_csv.py` is the core and knows nothing about directories, workers or
-Croissant. `document_directory.py` orchestrates. Everything else hangs off those
+Croissant. `parbakery.py` orchestrates. Everything else hangs off those
 two.
 
 ### What a run produces
@@ -674,7 +674,7 @@ for people.*
 |---|---|---|
 | `test_describe_csv.py` | 73 | measurements against files whose contents are known |
 | `test_progress.py` | 48 | the display, via a fake terminal |
-| `test_document_directory.py` | 40 | the directory pass, parallelism, output layout |
+| `test_parbakery.py` | 40 | the directory pass, parallelism, output layout |
 | `test_parbaked_croissant.py` | 28 | the Croissant, including real validator runs |
 | `test_checkpoints.py` | 18 | saving and resuming a killed read |
 | `test_identifiers.py` | 16 | the un-anonymised data check |

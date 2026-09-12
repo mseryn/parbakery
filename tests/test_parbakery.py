@@ -1,8 +1,8 @@
-"""Tests for document_directory.py.
+"""Tests for parbakery.py.
 
 Run with:
 
-    pytest test_document_directory.py -v
+    pytest test_parbakery.py -v
 
 Each test builds a small directory whose contents we already know, documents
 it, and checks the reports say what they should.
@@ -15,7 +15,7 @@ from settings import (
     DEFAULT_VALUES_SHOWN,
     DEFAULT_VALUES_TRACKED,
 )
-from document_directory import (
+from parbakery import (
     INDEX_FILENAME,
     build_index,
     describe_one_csv,
@@ -283,19 +283,19 @@ def test_a_file_with_nothing_dull_says_nothing(example_directory, output_directo
 
 def test_worker_count_never_exceeds_the_number_of_files():
     """An idle worker still costs a whole Python process and its pandas."""
-    from document_directory import worker_count
+    from parbakery import worker_count
     assert worker_count(8, file_count=3) == 3
     assert worker_count(8, file_count=20) == 8
 
 
 def test_worker_count_is_at_least_one():
-    from document_directory import worker_count
+    from parbakery import worker_count
     assert worker_count(0, file_count=5) == 1
     assert worker_count(-4, file_count=5) == 1
 
 
 def test_worker_count_defaults_to_something_sensible():
-    from document_directory import worker_count
+    from parbakery import worker_count
     assert worker_count(None, file_count=100) >= 1
 
 
@@ -343,7 +343,7 @@ def test_one_bad_file_does_not_stop_the_others_in_parallel(
 def test_croissants_go_in_their_own_subdirectory(example_directory, output_directory):
     """Kept apart so an unreviewed machine-generated file is never mistaken for
     a finished one sitting beside the reports."""
-    from document_directory import CROISSANT_SUBDIRECTORY
+    from parbakery import CROISSANT_SUBDIRECTORY
 
     document_directory(example_directory, output_directory, make_settings())
     croissants = output_directory / CROISSANT_SUBDIRECTORY
@@ -357,7 +357,7 @@ def test_croissants_go_in_their_own_subdirectory(example_directory, output_direc
 def test_each_croissant_has_a_markdown_in_the_markdown_folder(
     example_directory, output_directory
 ):
-    from document_directory import CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY
+    from parbakery import CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY
 
     document_directory(example_directory, output_directory, make_settings())
     croissants = output_directory / CROISSANT_SUBDIRECTORY
@@ -380,7 +380,7 @@ def test_output_is_sorted_into_three_folders(example_directory, output_directory
 
 
 def test_each_folder_holds_only_its_own_kind(example_directory, output_directory):
-    from document_directory import (
+    from parbakery import (
         CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY,
     )
 
@@ -409,7 +409,7 @@ def test_the_index_stays_at_the_top_level(example_directory, output_directory):
 
 
 def test_the_index_says_which_folder_each_file_is_in(example_directory, output_directory):
-    from document_directory import (
+    from parbakery import (
         CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY,
     )
 
@@ -425,7 +425,7 @@ def test_a_failed_file_still_gets_its_report_in_the_text_folder(
 ):
     """The traceback has to land somewhere findable, even for a file that failed
     before any folder was made for it."""
-    from document_directory import TEXT_SUBDIRECTORY
+    from parbakery import TEXT_SUBDIRECTORY
 
     results, _ = document_directory(
         directory_with_a_broken_file, output_directory, make_settings())
@@ -450,7 +450,7 @@ def test_nothing_is_ever_named_croissant_json(example_directory, output_director
 
 
 def test_croissants_can_be_skipped(example_directory, output_directory):
-    from document_directory import CROISSANT_SUBDIRECTORY
+    from parbakery import CROISSANT_SUBDIRECTORY
 
     settings = make_settings()
     settings["skip_croissant"] = True
@@ -463,7 +463,7 @@ def test_croissants_can_be_skipped(example_directory, output_directory):
 def test_a_croissant_failure_does_not_lose_the_report(example_directory, output_directory,
                                                       monkeypatch):
     """The text report is written first and must survive a later problem."""
-    import document_directory as module
+    import parbakery as module
 
     def explode(*args, **kwargs):
         raise RuntimeError("renderer unavailable")

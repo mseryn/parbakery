@@ -34,15 +34,15 @@ seventy lines of hand-written /proc parsing.
 Document a whole directory:
 
     cd parbake
-    python3 document_directory.py ../copies_of_data
+    python3 parbakery.py ../copies_of_data
 
 That reads the **first 1,000 rows** of each CSV and writes its reports to
 `./parbake_output`. Reading a preview is the default on purpose: these files can
 be hundreds of gigabytes, and a full scan should be something you ask for.
 
-    python3 document_directory.py ../copies_of_data --full
-    python3 document_directory.py ../copies_of_data --preview 10000
-    python3 document_directory.py ../copies_of_data --out /somewhere/else
+    python3 parbakery.py ../copies_of_data --full
+    python3 parbakery.py ../copies_of_data --preview 10000
+    python3 parbakery.py ../copies_of_data --out /somewhere/else
 
 A single file, printed to the screen:
 
@@ -60,7 +60,7 @@ metadata server that the whole machine shares. Reading is not the slow part;
 waiting is. A run over a thousand files can spend minutes doing nothing visible
 before the first row is read.
 
-    python3 document_directory.py /lus/eagle/.../log_syslog --full \
+    python3 parbakery.py /lus/eagle/.../log_syslog --full \
         --workers 32 --batch-local-copies
 
 `--batch-local-copies` has each worker copy its file to local disk, read it
@@ -78,7 +78,7 @@ anyway.
 
 ## Carrying on where a run left off
 
-    python3 document_directory.py ../copies_of_data --full --skip-existing
+    python3 parbakery.py ../copies_of_data --full --skip-existing
 
 `--skip-existing` leaves alone any file whose output is already in `--out`, and
 takes its index entry from the Croissant the previous run wrote. For picking up
@@ -215,9 +215,9 @@ This is the fine-grained version: one file, picked up mid-read. To skip files
 that finished entirely, see
 [Carrying on where a run left off](#carrying-on-where-a-run-left-off).
 
-    python3 document_directory.py ../data --full           # saves progress
-    python3 document_directory.py ../data --full           # carries on
-    python3 document_directory.py ../data --full --no-checkpoints
+    python3 parbakery.py ../data --full           # saves progress
+    python3 parbakery.py ../data --full           # carries on
+    python3 parbakery.py ../data --full --no-checkpoints
 
 Checkpoints live in `<out>/.parbake_checkpoints/` and the whole directory is
 removed once every file has been described. If anything failed, they are kept so

@@ -24,7 +24,7 @@ if sys.version_info < (3, 8):
         f"{sys.version_info.major}.{sys.version_info.minor}.\n"
         "On a cluster there is usually a newer one available -- try\n"
         "    module avail python\n"
-        "and load one, or point at it directly: /path/to/python3.11 document_directory.py ..."
+        "and load one, or point at it directly: /path/to/python3.11 parbakery.py ..."
     )
 
 
