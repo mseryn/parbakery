@@ -42,9 +42,8 @@ import os
 import time
 from pathlib import Path
 
-from identifiers import IdentifierCheck
 from measuring import ColumnSummary
-from settings import CHECKPOINT_EVERY_ROWS, CHECKPOINT_DIRECTORY_NAME
+from settings import CHECKPOINT_EVERY_ROWS
 
 # Bumped whenever the saved shape changes, so an old checkpoint is ignored
 # rather than misread.

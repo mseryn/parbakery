@@ -16,7 +16,8 @@ import shutil
 import sys
 import time
 
-import resources
+from formatting import describe_seconds, truncate_start
+from resources import REFRESH_SECONDS as RESOURCE_SECONDS, ResourceMonitor
 
 BAR_WIDTH = 20
 FILLED = "#"
@@ -24,7 +25,12 @@ EMPTY = "-"
 
 # How often the display is redrawn, in seconds. Fast enough to look alive,
 # slow enough that drawing it is not part of the measurement.
-REFRESH_SECONDS = 0.2
+#
+# Kept separate from the resource line's own rate (RESOURCE_SECONDS, five
+# seconds). Reading every worker's CPU and memory is far more expensive than
+# re-rendering text, and on a run with hundreds of workers doing it on the
+# redraw clock means most of the time goes on measuring rather than working.
+REDRAW_SECONDS = 0.2
 
 
 def render_bar(fraction, width=BAR_WIDTH):
@@ -34,23 +40,6 @@ def render_bar(fraction, width=BAR_WIDTH):
     fraction = max(0.0, min(1.0, fraction))
     filled = round(fraction * width)
     return FILLED * filled + EMPTY * (width - filled)
-
-
-def format_duration(seconds):
-    """Seconds as something short: 45s, 3m12s, 1h04m."""
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m{seconds % 60:02d}s"
-    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
-
-
-def shorten_name(name, limit):
-    """Trim a filename from the left, keeping the end, which is the useful part."""
-    if len(name) <= limit:
-        return name
-    return "..." + name[-(limit - 3):]
 
 
 # What each word in the display means. The progress line is squeezed to fit
@@ -64,11 +53,16 @@ DISPLAY_KEY = (
     "check     flagged for an anonymity check",
 )
 
+# Only meaningful when files are being copied to local disk first, so it is
+# left out of the key otherwise rather than explaining something that will
+# never appear.
+STAGING_KEY = ("copying   being copied to local disk, not yet read",)
 
-def print_key(say=print):
+
+def print_key(say=print, staging=False):
     """Say what each word in the display means."""
     say("  key")
-    for line in DISPLAY_KEY:
+    for line in DISPLAY_KEY + (STAGING_KEY if staging else ()):
         say(f"    {line}")
 
 
@@ -81,7 +75,8 @@ class FileProgress:
         self.rows_read = 0
         self.seconds = 0.0          # what the worker reported, once it finishes
         self.started_at = None      # our own clock, for the time in between
-        self.state = "waiting"      # waiting | reading | done | failed
+        self.state = "waiting"      # waiting | copying | reading | done | failed
+        self.finished_at = None     # our clock again, to show recent completions
         self.note = ""              # a short summary once it has finished
         self.reported = False       # used when we cannot redraw, to print once
 
@@ -110,10 +105,10 @@ class FileProgress:
 
     def line(self, index, total, name_width):
         """One line of the display."""
-        label = f"[{index}/{total}] {shorten_name(self.name, name_width):<{name_width}}"
+        label = f"[{index}/{total}] {truncate_start(self.name, name_width):<{name_width}}"
 
-        if self.state == "waiting":
-            return f"  {label}  {'':<{BAR_WIDTH}}   waiting"
+        if self.state in ("waiting", "copying"):
+            return f"  {label}  {'':<{BAR_WIDTH}}   {self.state}"
 
         bar = render_bar(self.fraction)
         if self.state == "failed":
@@ -121,7 +116,7 @@ class FileProgress:
 
         if self.state == "done":
             return (f"  {label}  [{bar}]   done  {self.rows_read:>12,} rows"
-                    f"  {format_duration(self.elapsed):>6}  {self.note}")
+                    f"  {describe_seconds(self.elapsed):>6}  {self.note}")
 
         # Still reading. An estimated total gives a percentage; without one we
         # can still show the rows so far, which is better than nothing.
@@ -130,7 +125,7 @@ class FileProgress:
         else:
             share = f"{self.fraction:>4.0%}"
         return (f"  {label}  [{bar}]  {share}  {self.rows_read:>12,} rows"
-                f"  {format_duration(self.elapsed):>6}")
+                f"  {describe_seconds(self.elapsed):>6}")
 
 
 class ProgressDisplay:
@@ -141,6 +136,8 @@ class ProgressDisplay:
         self.stream = stream or sys.stderr
         self.show_resources = show_resources
         self.workers = workers
+        # Holds the previous CPU reading, so the next one can be a rate.
+        self.monitor = ResourceMonitor() if show_resources else None
         self.resource_text = ""
         self.resources_read_at = 0.0
         # Redrawing needs a terminal. Anything else gets plain lines.
@@ -165,13 +162,70 @@ class ProgressDisplay:
         # Start our own clock the moment a file begins.
         if changes.get("state") == "reading" and progress.started_at is None:
             progress.started_at = time.monotonic()
+        if changes.get("state") in ("done", "failed") and progress.finished_at is None:
+            progress.finished_at = time.monotonic()
         for field, value in changes.items():
             setattr(progress, field, value)
 
+    def summary_line(self):
+        """One line accounting for every file, for when they cannot all be shown."""
+        counts = {}
+        for progress in self.files:
+            counts[progress.state] = counts.get(progress.state, 0) + 1
+
+        # Only mention the states that apply: "0 failed" on a healthy run is
+        # noise, and "copying" is meaningless unless files are being copied.
+        parts = []
+        for state in ("done", "failed", "copying", "reading", "waiting"):
+            if counts.get(state):
+                parts.append(f"{counts[state]:,} {state}")
+        return f"  {len(self.files):,} files: " + (", ".join(parts) or "starting")
+
+    def window_of_file_lines(self, room):
+        """At most `room` lines, showing the files that are actually moving.
+
+        Picking a window by position instead lets one slow file near the top
+        pin the screen in place, so it sits still while hundreds of others come
+        and go below it. Active files are picked out wherever they sit in the
+        list; every line carries its own [n/total], so a gap between them reads
+        perfectly well.
+
+        Room left over goes to whatever finished most recently, so completions
+        can be watched happening rather than only counted.
+        """
+        if room <= 0:
+            return []
+        total = len(self.files)
+
+        active = [position for position, progress in enumerate(self.files)
+                  if progress.state in ("reading", "copying")]
+        not_shown = max(0, len(active) - room)
+        shown = set(active[:room])
+
+        spare = room - len(shown)
+        if spare > 0:
+            finished = sorted(
+                (position for position, progress in enumerate(self.files)
+                 if progress.finished_at is not None),
+                key=lambda position: self.files[position].finished_at,
+            )
+            shown.update(finished[-spare:])
+
+        # Before anything has started there is nothing moving to show, so show
+        # what is about to be.
+        if not shown:
+            shown = set(range(min(room, total)))
+
+        drawn = [self.files[position].line(position + 1, total, self.name_width)
+                 for position in sorted(shown)]
+        if not_shown:
+            drawn[-1] = f"  ... and {not_shown:,} more being read"
+        return drawn
+
     def draw(self, force=False):
-        """Redraw, at most every REFRESH_SECONDS unless forced."""
+        """Redraw, at most every REDRAW_SECONDS unless forced."""
         now = time.monotonic()
-        if not force and now - self.last_drawn_at < REFRESH_SECONDS:
+        if not force and now - self.last_drawn_at < REDRAW_SECONDS:
             return
         self.last_drawn_at = now
 
@@ -180,16 +234,34 @@ class ProgressDisplay:
             # Refreshed on its own slower clock: it is context, not progress,
             # and reading /proc for every worker on every frame would be work
             # spent measuring instead of working.
-            if now - self.resources_read_at >= resources.REFRESH_SECONDS or not self.resource_text:
-                self.resource_text = resources.resource_line(workers=self.workers)
+            if now - self.resources_read_at >= RESOURCE_SECONDS or not self.resource_text:
+                self.resource_text = self.monitor.line(workers=self.workers)
                 self.resources_read_at = now
             lines.append(self.resource_text)
             lines.append("")
 
-        lines += [
-            progress.line(number, len(self.files), self.name_width)
-            for number, progress in enumerate(self.files, start=1)
-        ]
+        if self.can_redraw:
+            # Redrawing works by moving the cursor up over what was written
+            # last time. The cursor cannot travel above the top of the screen,
+            # so writing more lines than the terminal is tall leaves it in the
+            # wrong place and the whole display scrolls away every frame. One
+            # row is left spare for the cursor to rest on.
+            height = shutil.get_terminal_size((100, 24)).lines
+            room = max(1, height - len(lines) - 1)
+        else:
+            room = len(self.files)
+
+        if room >= len(self.files):
+            lines += [
+                progress.line(number, len(self.files), self.name_width)
+                for number, progress in enumerate(self.files, start=1)
+            ]
+        else:
+            # More files than screen. A count stands in for the ones not shown
+            # so nothing disappears silently, and the index written at the end
+            # has every file regardless.
+            lines.append(self.summary_line())
+            lines += self.window_of_file_lines(room - 1)
 
         if self.can_redraw:
             if self.lines_drawn:

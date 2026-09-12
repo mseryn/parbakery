@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Per-column measurements, accumulated one batch at a time.
-
-Nothing here grows with the size of the file except the tracked-value table,
-which has a hard ceiling. That is what lets a file of any size be described in
-one pass."""
+"""Per-column measurements, accumulated one batch at a time."""
 
 import numpy
 import pandas
@@ -11,17 +7,17 @@ import pandas
 from settings import (
     DEFAULT_VALUES_SHOWN,
     DEFAULT_VALUES_TRACKED,
-    MINIMUM_LISTING_COVERAGE,
     NULL_LIKE_TEXT,
     SINGLE_VALUE_THRESHOLD,
 )
 
 
 class ColumnSummary:
-    """Everything we are measuring about a single column.
+    """Everything measured about a single column, folded in one batch at a time.
 
-    Updated one batch at a time. Nothing here grows with the size of the file
-    except the tracked-values table, which has a hard ceiling.
+    Nothing here grows with the size of the file except the tracked-value table,
+    which has a hard ceiling. That is what lets a file of any size be described
+    in one pass.
 
     To measure something new, add it in three places: a starting value in
     __init__, the update in add_batch, and a line in as_dict.
@@ -33,7 +29,7 @@ class ColumnSummary:
         self.values_tracked = values_tracked
 
         self.rows_seen = 0
-        self.empty_count = 0              # the field was blank
+        self.empty_count = 0
         self.null_like_text_count = 0     # the field said "NA", "NULL", ...
 
         # value -> how many times we saw it. Stops accepting new values once it
@@ -107,9 +103,13 @@ class ColumnSummary:
         """Measure the values that are numbers, without changing what was read.
 
         pandas.to_numeric turns anything it cannot read into "not a number", so
-        counting those tells us how numeric the column really is. We also drop
-        infinities, because the word "inf" in a text file is a word, not a
-        measurement.
+        counting those tells us how numeric the column really is.
+
+        The isfinite check is doing more than it looks. to_numeric reads "nan"
+        and "inf" as real float values, so without it the literal words would be
+        counted as numbers and "inf" would become the largest value in the
+        column. Discarding everything non-finite catches both, and needs no
+        pattern matching.
         """
         as_numbers = pandas.to_numeric(filled_in, errors="coerce")
         is_real_number = numpy.isfinite(as_numbers)
@@ -176,8 +176,10 @@ class ColumnSummary:
     def most_common(self, how_many):
         """The most frequent values, commonest first.
 
-        Ties are broken by the value itself so that two runs over the same file
-        produce the same report.
+        Ties are broken by the value itself, so two runs over the same file
+        produce the same report. That is why value_counts is a plain dict rather
+        than a collections.Counter: Counter.most_common breaks ties by insertion
+        order, which depends on what order the batches happened to arrive in.
         """
         return sorted(
             self.value_counts.items(), key=lambda pair: (-pair[1], pair[0])

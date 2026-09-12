@@ -6,6 +6,23 @@ Rides along on the normal read, so it costs no extra pass over the file."""
 from settings import COLUMN_NAMES_TO_WATCH, PATH_PROBE_VALUES
 
 
+def names_worth_checking(columns_of_concern):
+    """The columns from a concern list that a person should actually look at.
+
+    A column of all-digit values is consistent with an anonymised id and is
+    reported without being singled out. Letters, or values shaped like paths,
+    are not, and those are the ones worth someone's time.
+
+    Defined here, once, because both the index of a fresh run and the index
+    rebuilt for a skipped file have to agree on what counts.
+    """
+    return [
+        entry["column_name"]
+        for entry in columns_of_concern
+        if "NOT consistent" in entry["verdict"] or "path" in entry["verdict"]
+    ]
+
+
 class IdentifierCheck:
     """Looks for data that has not been anonymised.
 

@@ -111,14 +111,28 @@ rather than by reading.
 
 ### Batching
 
-`DEFAULT_BATCH_SIZE = 100_000`. Two reasons it is not larger:
+The batch size is not a fixed number of rows. Memory is rows *times* columns, so
+a fixed row count makes a wide file cost far more than a narrow one -- and a
+worker that is fine on one file gets killed by the next. `rows_per_batch()`
+holds the number of *cells* roughly fixed instead:
+
+    rows = clamp(CELL_BUDGET_PER_BATCH // column_count,
+                 MINIMUM_BATCH_ROWS, MAXIMUM_BATCH_ROWS)     # 1,000,000 // n, 2k..100k
+
+A 66-column file went from 426 MB to 175 MB per worker for about 10-15% more
+time. The ceiling of 100,000 rows is the old fixed default, kept so that narrow
+files are never worse off than they were: without it, a 3-column file ballooned
+to 333,333-row batches and measured 247 MB / 3.5s against the old 201 MB / 3.2s
+-- worse on both counts. With the ceiling the change is strictly one-sided.
+
+Two reasons the budget is not larger:
 
 - **Memory.** Each worker holds a batch, and eight workers hold eight of them. A
   batch of strings is not small.
 - **Progress.** The row count only moves when a batch finishes, so large batches
   make a progress bar sit still.
 
-Measured on a 236,592-row file: going from 500,000 to 100,000 cost **5%** of
+Measured on a 236,592-row file: going from 500,000 to 100,000 rows cost **5%** of
 reading speed and gave **three times** the progress updates.
 
 There is a test asserting that batch size does not change any measurement.
@@ -390,14 +404,93 @@ worker, because several workers writing to one terminal interleave into nonsense
 
 ---
 
-## 9. The progress display
+### Reading from a shared filesystem
 
-`progress.py`, about 175 lines, no dependencies. One line per file, redrawn in
-place with ANSI cursor movement:
+Parallelism helps when the bottleneck is CPU. On a parallel filesystem it often
+is not. Opening a file on Lustre costs a round trip to a metadata server shared
+by the whole machine, and a run over a thousand files pays that a thousand times
+before reading anything worth having.
+
+This showed up as a hang. A run on 1,226 files across 250 GB printed its header
+and then sat there. The cause was a loop in the parent that estimated every
+file's row count up front, purely to give the progress bars a denominator --
+1,226 sequential opens, each a metadata round trip, before a single worker
+started. Locally that loop takes 0.3 seconds; on Lustre it is minutes of blank
+screen.
+
+Two changes came out of it.
+
+**Estimating moved off the startup path.** With `--batch-local-copies` each
+worker estimates its own file, from its local copy, and sends the number back on
+the progress queue. Bars start as `?` and fill in. The parent does no per-file
+I/O at all, so the display appears immediately.
+
+**`--batch-local-copies` copies before reading.** A worker copies its file to
+local disk, reads it there, deletes the copy, and only then takes the next one.
+One large sequential transfer instead of many small waits, which is what such a
+filesystem is actually good at.
+
+The first version of this batched: copy `workers` files, process them all,
+delete them, repeat. That was wrong. It made every worker wait for the slowest
+member of its batch before any of them could start the next -- a barrier that
+buys nothing. Copying per worker gives the same guarantee for free: a worker
+holds exactly one copy at a time, so there are never more copies on local disk,
+or more readers on the shared filesystem, than there are workers. No barrier,
+no bookkeeping. There is a test that reads completion order off the display and
+fails if a barrier ever comes back.
+
+It is off by default. It reads every byte of every file, so it only pays when
+the file was going to be read through anyway; on a local filesystem it is loss.
+
+One thing it deliberately does not do is prefetch the next file while reading
+the current one. That would hide the copy time, but it holds two files locally
+and puts twice the readers on the shared filesystem, which is the cost the flag
+exists to bound.
+
+## 9. Skipping work already done
+
+`--skip-existing` leaves alone any file whose output is already present. For
+carrying on after an interrupted run, or adding files to a directory documented
+last week.
+
+A file counts as done only when *every* output this run would write exists --
+report, and Croissant and Markdown unless `--no-croissant` was given. All of
+them, not any: a run killed mid-file leaves a report with no Croissant beside
+it, and treating that as finished would bake in the half-written state.
+
+The decision is made in the parent, before any job is submitted, so a skipped
+file is never opened, never copied, and never costs a round trip.
+
+The awkward part is the index. It is rewritten from scratch every run, so
+skipped files would leave holes in it -- on a resumed 1,226-file run, most of
+the index. The par-baked Croissant already holds everything the index reports,
+in `_parbake` and `_parbake_measurements`, so entries are read back from there
+rather than reduced to the word "skipped". A fresh index and a skipped one are
+identical apart from the marker line.
+
+That exposed a gap. The anonymity flags -- the most consequential thing measured
+-- lived *only* in the prose report, not in the machine-readable Croissant. They
+are now recorded in `_parbake` as `columns_of_concern`. Croissants written
+before that change do not have the key, and those report **NOT KNOWN**, never an
+empty list: an absent line would read as "nothing to check" about a file nobody
+checked, and this tool flags rather than certifies.
+
+It is worth being clear about what this is not. Checkpointing fingerprints a
+file by size and modification time and notices when it changes. This does not.
+It looks only at whether the output exists, so a file edited since it was
+documented keeps its old description until read again. That is what the flag is
+for, but it is a sharp edge.
+
+---
+
+## 10. The progress display
+
+`progress.py`, about 290 lines. One line per file, redrawn in place with ANSI
+cursor movement. It leans on `resources.py`, which uses psutil:
 
 ```
   [1/6] dataset_1.csv  [################----]   78%       200,000 rows      7s
-  [2/6] dataset_2.csv  [####################]   done      236,592 rows      7s  66 cols, 33 dull, check 3
+  [2/6] dataset_2.csv  [####################]   done      236,592 rows      7s  66 cols, 33 constant, check 3
   [3/6] dataset_3.csv                         waiting
 ```
 
@@ -417,17 +510,51 @@ average. Eight points brings that to about 7%, which is fine for a bar.
 taken from worker messages — those only arrive when a batch finishes, so a
 display driven by them alone sits frozen on a slow file and looks hung.
 
+**It never writes more lines than the terminal is tall.** Redrawing works by
+moving the cursor up over the previous frame, and the cursor cannot travel above
+the top of the screen. A frame taller than the terminal therefore lands in the
+wrong place, clears from there, and scrolls the whole display away — every
+refresh. On 1,226 files the frame was 1,226 lines and 94 KB, five times a
+second, and the screen flickered continuously.
+
+Above that height the display shows a summary line accounting for every file,
+then as many file rows as fit. 94 KB per frame became 2 KB.
+
+Which rows to show is decided by what is *moving*, not by position in the list.
+An earlier version windowed from the first unfinished file, which looks
+reasonable until one slow file near the top pins the view: the screen sits
+still while hundreds of others come and go below it. Active files are picked out
+wherever they sit, and any room left over goes to the most recent completions,
+so progress is visible. Every row carries its own `[n/total]`, so a gap between
+them reads fine.
+
+```
+  1,226 files: 800 done, 251 reading, 175 waiting
+  [1/1226] syslog-2024-0000.csv.gz    [????????????????????]  ?  9,000,000 rows
+  [802/1226] syslog-2024-0801.csv.gz  [????????????????????]  ?        500 rows
+  ...
+  ... and 229 more being read
+```
+
+**The two clocks are separate on purpose.** The display redraws every 0.2s;
+the resource line refreshes every 5s. Walking every worker's CPU and memory is
+far more expensive than re-rendering text, and on a run with 250 workers doing
+it on the redraw clock spends most of the time measuring rather than working.
+They were briefly the same by accident — see §13.
+
 ---
 
-## 10. Settings
+## 11. Settings
 
-All at the top of `describe_csv.py`, each with a comment. `document_directory.py`
-imports them, so there is one place to change anything.
+All in `settings.py`, grouped by what they affect, each with a comment. Every
+other module imports them from there, so there is one place to change anything.
+They started at the top of `describe_csv.py` and moved out when the second and
+third readers of them appeared.
 
 | Setting | Value | Meaning |
 |---|---|---|
 | `DEFAULT_PREVIEW_ROWS` | 1,000 | rows read by `--preview` |
-| `DEFAULT_BATCH_SIZE` | 100,000 | rows held in memory at once |
+| `CELL_BUDGET_PER_BATCH` | 1,000,000 | cells held at once; the row count follows from the file's width |
 | `DEFAULT_VALUES_TRACKED` | 1,000 | different values counted per column |
 | `DEFAULT_VALUES_SHOWN` | 10 | values listed per column in the report |
 | `SINGLE_VALUE_THRESHOLD` | 0.99 | share of rows for a column to count as constant |
@@ -439,7 +566,7 @@ imports them, so there is one place to change anything.
 
 ---
 
-## 11. Principles the code holds to
+## 12. Principles the code holds to
 
 These are not style preferences. Breaking one of them is a defect.
 
@@ -468,7 +595,7 @@ size and for parallelism.
 
 ---
 
-## 12. Bugs found, and what they taught
+## 13. Bugs found, and what they taught
 
 Worth recording, because all of them were **silent** — none raised an error, all
 produced plausible-looking numbers, and all were found by measuring rather than
@@ -507,20 +634,53 @@ inside `parbake/`. They ran from anywhere. The `pythonpath` setting added to fix
 it was doing nothing at the time — though it became load-bearing later when the
 tests moved into `tests/`. *Lesson: check the claim before writing the fix.*
 
+**A shadowed constant that quietly undid a design decision.** `progress.py`
+imported `REFRESH_SECONDS` (5.0s) from `resources.py` and then, twenty lines
+later, defined `REFRESH_SECONDS = 0.2` for its own redraw rate. The import was
+dead and nothing complained. The resource line — deliberately slow, because
+walking every worker's `/proc` is expensive — had been running at 0.2s, twenty-
+five times its intended rate, across every worker. *Lesson: two different rates
+must not share a name. The names are now `REDRAW_SECONDS` and `RESOURCE_SECONDS`,
+with a test asserting they stay apart.*
+
+**A display taller than the screen.** The terminal's *width* was consulted and
+its *height* never was, so the frame grew with the file count: 1,226 lines into a
+24-line terminal. The redraw's cursor-up cannot travel past the top of the
+screen, so every frame started from the wrong row and scrolled the display away.
+*Lesson: a thing that works at demo size is not thereby tested. The bug needed
+1,000 files to appear and was invisible on six.*
+
+**A barrier that bought nothing.** The first version of local copying worked in
+batches: copy `workers` files, process them all, delete them, repeat. Every
+worker waited for the slowest member of its batch. The per-worker version gives
+the same bound with no waiting. *Lesson: the obvious way to enforce a cap was
+not the cheap way — the cap fell out of the structure once it was arranged
+properly.*
+
+**A measurement that existed only in prose.** The anonymity flags — the most
+consequential thing the tool produces — were written into the text report and
+nowhere else. Nothing reading the Croissant could see them. It went unnoticed
+until `--skip-existing` needed to read findings back. *Lesson: if a finding
+matters, it belongs in the machine-readable artefact, not only in the one meant
+for people.*
+
 ---
 
-## 13. Tests
+## 14. Tests
 
-166 tests, a few seconds, plain pytest.
+263 tests, a few seconds, plain pytest.
 
 | file | tests | covers |
 |---|---|---|
-| `test_describe_csv.py` | 39 | measurements against files whose contents are known |
-| `test_document_directory.py` | 35 | the directory pass, parallelism, output layout |
+| `test_describe_csv.py` | 73 | measurements against files whose contents are known |
+| `test_progress.py` | 48 | the display, via a fake terminal |
+| `test_document_directory.py` | 40 | the directory pass, parallelism, output layout |
+| `test_parbaked_croissant.py` | 28 | the Croissant, including real validator runs |
+| `test_checkpoints.py` | 18 | saving and resuming a killed read |
 | `test_identifiers.py` | 16 | the un-anonymised data check |
-| `test_parbaked_croissant.py` | 26 | the Croissant, including real validator runs |
-| `test_progress.py` | 21 | the display, via a fake terminal |
-| `test_skill_markers.py` | 10 | the strings the skill looks for actually exist |
+| `test_staging.py` | 16 | copying to local disk, and cleaning up after |
+| `test_already_done.py` | 12 | skipping files a previous run finished |
+| `test_skill_markers.py` | 12 | the strings the skill looks for actually exist |
 
 The ones that matter most, because their failure would be quiet:
 
@@ -536,7 +696,7 @@ The ones that matter most, because their failure would be quiet:
 
 ---
 
-## 14. The reading skill
+## 15. The reading skill
 
 `skills/reading-croissant-datasets/SKILL.md`. An AI-readable skill for the other
 end of the pipeline: someone hands a Croissant and its dataset to an AI, and the
@@ -558,7 +718,7 @@ present in generated output and absent from a reviewed Croissant.
 
 ---
 
-## 15. What it deliberately does not do
+## 16. What it deliberately does not do
 
 - **CSV only.** `.parquet`, `.json` and `.jsonl` are recognised and listed in the
   index with a stated reason, pending a reader.
@@ -576,7 +736,7 @@ present in generated output and absent from a reviewed Croissant.
 
 ---
 
-## 16. Where to extend it
+## 17. Where to extend it
 
 **A new measurement**: `ColumnSummary` is the extension point — a starting value
 in `__init__`, an update in `add_batch`, a line in `as_dict`. There is a comment
@@ -595,7 +755,7 @@ next dataset, which is what decides whether a multi-hour pass is worth running.
 
 ---
 
-## 17. Open items
+## 18. Open items
 
 - `COLUMN_NAMES_TO_WATCH` over-flags on the bare word `name` — three false alarms
   on the Polaris file.
@@ -604,5 +764,19 @@ next dataset, which is what decides whether a multi-hour pass is worth running.
   that number.
 - The encodings trap was cut from the skill pending more detail.
 - Non-CSV readers are deferred pending a review of this version's correctness.
-- `parbake/.git` has one commit; everything since is uncommitted, including the
-  `.gitignore` that keeps `parbake_output/` out of the working tree.
+- `_estimate_compressed_rows` can read an entire file. The loop stops when it has
+  produced enough *output*, but a decompressor that has reached the end of a gzip
+  member returns nothing from further input — so a multi-member file (what
+  logrotate produces) reads to the end for a few hundred bytes. It needs a cap on
+  input bytes. Not the cause of the Lustre hang, but it makes one worse.
+- `worker_count()` caps an explicit `--workers` against the file count but not
+  against the CPU count, so `--workers 250` is honoured as given. At roughly
+  175–200 MB per worker that is about 50 GB, and with `--batch-local-copies` it
+  is also 250 concurrent copies. Needs a decision: cap it, or warn loudly with
+  the projected memory.
+- `bakery/knowledge.py` is written and tested but not yet wired into the baking
+  flow — nothing asks "what machine is this" or offers a remembered answer.
+- `bakery/` is not under version control at all.
+- `parbake/.git` is three commits deep, the last being `91cb372`; everything
+  after it — staging, `--skip-existing`, the display fixes, the knowledge store —
+  is uncommitted.

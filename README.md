@@ -19,9 +19,12 @@ conclusions to a person.
 
 ## Requirements
 
-Python 3.9 or newer, and pandas.
+Python 3.9 or newer, pandas, and psutil.
 
-    pip install pandas
+    pip install pandas psutil
+
+psutil is used for the resource line at the top of a run. It replaced about
+seventy lines of hand-written /proc parsing.
 
 `pytest` as well if you want to run the tests.
 
@@ -48,6 +51,53 @@ A single file, printed to the screen:
     python3 describe_csv.py data.csv --json summary.json
 
 `--help` on either script lists every option.
+
+
+## Reading from a shared filesystem
+
+On a parallel filesystem like Lustre, opening a file costs a round trip to a
+metadata server that the whole machine shares. Reading is not the slow part;
+waiting is. A run over a thousand files can spend minutes doing nothing visible
+before the first row is read.
+
+    python3 document_directory.py /lus/eagle/.../log_syslog --full \
+        --workers 32 --batch-local-copies
+
+`--batch-local-copies` has each worker copy its file to local disk, read it
+there, and delete the copy before taking the next one. One large sequential
+transfer instead of many small waits. Because a worker holds exactly one copy
+at a time, there are never more copies on local disk -- or more readers on the
+shared filesystem -- than there are workers. `--local-copy-dir` says where the
+copies go; the default is `$TMPDIR`, which on a compute node is usually
+node-local storage.
+
+It is off by default, and on a local filesystem it is pure loss: it reads every
+byte of every file, so it only pays when the file was going to be read through
+anyway.
+
+
+## Carrying on where a run left off
+
+    python3 document_directory.py ../copies_of_data --full --skip-existing
+
+`--skip-existing` leaves alone any file whose output is already in `--out`, and
+takes its index entry from the Croissant the previous run wrote. For picking up
+after a run was interrupted, or for adding new files to a directory that was
+documented last week.
+
+A file counts as done only when *every* output this run would write is there --
+a run killed mid-file can leave a report with no Croissant beside it, and
+treating that as finished would bake in the half-written state.
+
+It looks only at whether the output exists, not at whether the file has changed
+since. That is unlike checkpointing, which fingerprints size and modification
+time. A file edited since it was documented keeps its old description until you
+run it again without the flag.
+
+This is the coarse version of carrying on: whole files that are already done.
+For a single enormous file that was killed halfway through, see
+[Being killed, and carrying on](#being-killed-and-carrying-on) -- the two work
+together, and a run can use both.
 
 
 ## What you get
@@ -161,6 +211,10 @@ Long reads get killed -- by the out-of-memory killer, by a scheduler, by a
 closed laptop. Progress is saved every `--checkpoint-every` rows (default
 1,000,000), and the next run carries on rather than starting again.
 
+This is the fine-grained version: one file, picked up mid-read. To skip files
+that finished entirely, see
+[Carrying on where a run left off](#carrying-on-where-a-run-left-off).
+
     python3 document_directory.py ../data --full           # saves progress
     python3 document_directory.py ../data --full           # carries on
     python3 document_directory.py ../data --full --no-checkpoints
@@ -219,8 +273,9 @@ columns. It tells you where to look.
 
 ## Settings
 
-All of them live at the top of `describe_csv.py`, with a comment on each.
-`document_directory.py` imports them, so there is one place to change anything.
+All of them live in `settings.py`, grouped by what they affect, with a comment
+on each. Every other module imports them from there, so there is one place to
+change anything.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -244,7 +299,7 @@ which flags `MACHINE_NAME` and `QUEUE_NAME` alongside the real ones.
     cd parbake
     pytest
 
-223 tests, a few seconds. They cover the measurements against files whose
+263 tests, a few seconds. They cover the measurements against files whose
 contents are known, the identifier check, and the directory pass. Three
 behaviours are pinned deliberately because getting them wrong would be quiet
 rather than loud:

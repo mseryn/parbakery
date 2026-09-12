@@ -2,37 +2,20 @@
 """Printing a description so a person can read it.
 
 Kept apart from the measuring so that how something is shown can change without
-touching what is measured."""
+touching what is measured. Covers both levels: one file's report, and the
+index over a whole directory of them."""
 
+import datetime
+
+from formatting import describe_bytes, describe_number, truncate_end
 from settings import (
+    CROISSANT_SUBDIRECTORY,
     DEFAULT_VALUES_SHOWN,
+    MARKDOWN_SUBDIRECTORY,
     MINIMUM_LISTING_COVERAGE,
     SINGLE_VALUE_THRESHOLD,
+    TEXT_SUBDIRECTORY,
 )
-
-
-def describe_size(size_in_bytes):
-    """Turn a byte count into something readable, e.g. "26.5 MB"."""
-    size = float(size_in_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.1f} {unit}"
-        size = size / 1024
-
-
-def format_number(value):
-    """Show a number without inventing decimal places it does not have."""
-    if value is None:
-        return "-"
-    if float(value).is_integer() and abs(value) < 2 ** 53:
-        return f"{int(value):,}"
-    return f"{value:,.6g}"
-
-
-def shorten(text, limit=28):
-    """Keep a value short enough to fit in a table cell."""
-    text = str(text)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def print_identifier_report(result):
@@ -71,7 +54,7 @@ def print_report(result, values_shown=DEFAULT_VALUES_SHOWN):
     summaries = result["_summaries"]
 
     print(f"\n{file_details['path']}")
-    print(f"  {describe_size(file_details['size_in_bytes'])} on disk"
+    print(f"  {describe_bytes(file_details['size_in_bytes'])} on disk"
           f"  |  {file_details['column_count']} columns"
           f"  |  {file_details['rows_read']:,} rows read"
           f"  |  {file_details['seconds_taken']}s")
@@ -95,7 +78,7 @@ def print_report(result, values_shown=DEFAULT_VALUES_SHOWN):
         if top:
             top_value, top_count = top[0]
             share = top_count / summary.filled_in_count if summary.filled_in_count else 0
-            top_text = shorten(repr(top_value), 28)
+            top_text = truncate_end(repr(top_value), 28)
             share_text = f"{share:>5.1%}"
         else:
             top_text, share_text = "-", "-"
@@ -141,7 +124,7 @@ def print_report(result, values_shown=DEFAULT_VALUES_SHOWN):
                     f"   ({other_rows:,} of {summary.rows_seen:,} rows differ)"
                 )
                 print(f"      {summary.column_name:<{width}}  "
-                      f"{shorten(repr(value), 30):<32}"
+                      f"{truncate_end(repr(value), 30):<32}"
                       f"{summary.single_value_share:>6.1%}{note}")
 
     # Numbers, for the columns that have any.
@@ -159,8 +142,8 @@ def print_report(result, values_shown=DEFAULT_VALUES_SHOWN):
                 f"  {summary.column_name:<{name_width}}"
                 f"  {summary.number_count:>12,}"
                 f"  {summary.not_a_number_count:>12,}"
-                f"  {format_number(summary.smallest_number):>16}"
-                f"  {format_number(summary.largest_number):>16}"
+                f"  {describe_number(summary.smallest_number):>16}"
+                f"  {describe_number(summary.largest_number):>16}"
             )
 
     # The values themselves -- but only where the list actually says something.
@@ -187,14 +170,14 @@ def print_report(result, values_shown=DEFAULT_VALUES_SHOWN):
             suppressed.append(
                 f"    {summary.column_name}  ({distinct_note}) -- list suppressed, "
                 f"top {len(shown)} cover only {coverage:.1%} of rows; "
-                f"most common {shorten(repr(top_value), 30)} at {top_share:.1%}"
+                f"most common {truncate_end(repr(top_value), 30)} at {top_share:.1%}"
             )
             continue
 
         print(f"\n    {summary.column_name}  ({distinct_note})")
         for value, count in shown:
             share = count / summary.filled_in_count if summary.filled_in_count else 0
-            print(f"      {shorten(repr(value), 40):<42} {count:>12,}  {share:>6.1%}")
+            print(f"      {truncate_end(repr(value), 40):<42} {count:>12,}  {share:>6.1%}")
 
     if suppressed:
         print(f"\n  columns whose values do not repeat enough to list "
@@ -202,3 +185,95 @@ def print_report(result, values_shown=DEFAULT_VALUES_SHOWN):
         for line in suppressed:
             print(line)
 
+
+def build_index(directory_to_scan, results, other_files, settings):
+    """Build the text of DIRECTORY_DOCUMENTATION.txt."""
+    scanned_at = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+    lines = [
+        "# DIRECTORY DOCUMENTATION",
+        "",
+        f"Directory scanned: {directory_to_scan}",
+        f"Scanned at:        {scanned_at}",
+        f"Read:              {settings['scope_description']}",
+        "",
+        f"# CSV files ({len(results)})",
+        "",
+    ]
+
+    if not results:
+        lines.append("  (none)")
+    for outcome in results:
+        name = outcome["file"].name
+        size = describe_bytes(outcome["file"].stat().st_size)
+        # Each file's entry runs to several lines, so they need separating or
+        # one file's detail reads as the next file's heading.
+        if lines[-1] != "":
+            lines.append("")
+        if not outcome["ok"]:
+            lines.append(f"  {name}  ({size})")
+            lines.append(f"      COULD NOT READ: {outcome['problem']}")
+            lines.append(f"      details in {outcome['report_path'].name}")
+            continue
+        lines.append(f"  {name}  ({size})")
+        if outcome.get("skipped"):
+            # Not re-read this run, so there is no timing to report and the
+            # figures below come from whenever it was last read.
+            lines.append(
+                f"      SKIPPED -- already documented. {outcome['rows_read']:,} rows, "
+                f"{outcome['column_count']} columns, from the previous run "
+                f"({outcome['scope']})"
+            )
+        else:
+            lines.append(
+                f"      {outcome['rows_read']:,} rows read, {outcome['column_count']} columns"
+                f", {outcome['seconds']}s -- {outcome['scope']}"
+            )
+        if outcome["columns_to_check"]:
+            lines.append(
+                f"      check before sharing: {', '.join(outcome['columns_to_check'])}"
+            )
+        elif outcome.get("check_results_unknown"):
+            # Saying nothing here would read as "nothing to check". This tool
+            # flags and never certifies, so an unknown has to say so out loud.
+            lines.append(
+                "      check before sharing: NOT KNOWN -- the previous run did not "
+                "record it. Rerun this file without --skip-existing to find out."
+            )
+        if outcome["empty_columns"]:
+            lines.append(
+                f"      empty in every row ({len(outcome['empty_columns'])}): "
+                f"{', '.join(outcome['empty_columns'])}"
+            )
+        if outcome["constant_columns"]:
+            lines.append(
+                f"      one value covers 99%+ of rows "
+                f"({len(outcome['constant_columns'])}): "
+                f"{', '.join(outcome['constant_columns'])}"
+            )
+        lines.append(
+            f"      described in {TEXT_SUBDIRECTORY}/{outcome['report_path'].name}")
+        if outcome.get("croissant_path"):
+            lines.append(
+                f"      par-baked croissant: {CROISSANT_SUBDIRECTORY}/"
+                f"{outcome['croissant_path'].name}"
+                f" -- NOT REVIEWED, fails validation on purpose"
+            )
+            if outcome.get("markdown_path"):
+                lines.append(
+                    f"      rendered as: {MARKDOWN_SUBDIRECTORY}/"
+                    f"{outcome['markdown_path'].name}")
+        if outcome.get("croissant_problem"):
+            lines.append(f"      croissant NOT written: {outcome['croissant_problem']}")
+    lines.append("")
+
+    lines.append(f"# Other files, not examined ({len(other_files)})")
+    lines.append("")
+    if other_files:
+        for other_file in other_files:
+            lines.append(f"  {other_file.name}  ({describe_bytes(other_file.stat().st_size)})")
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    return "\n".join(lines)

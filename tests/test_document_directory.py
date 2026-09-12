@@ -371,7 +371,7 @@ def test_each_croissant_has_a_markdown_in_the_markdown_folder(
 
 def test_output_is_sorted_into_three_folders(example_directory, output_directory):
     """One folder per kind, so fifty datasets do not become a heap of files."""
-    from document_directory import OUTPUT_SUBDIRECTORIES
+    from settings import OUTPUT_SUBDIRECTORIES
 
     document_directory(example_directory, output_directory, make_settings())
 
@@ -399,7 +399,7 @@ def test_each_folder_holds_only_its_own_kind(example_directory, output_directory
 
 def test_the_index_stays_at_the_top_level(example_directory, output_directory):
     """It is the index to all three folders, so filing it under one would be odd."""
-    from document_directory import OUTPUT_SUBDIRECTORIES
+    from settings import OUTPUT_SUBDIRECTORIES
 
     document_directory(example_directory, output_directory, make_settings())
 

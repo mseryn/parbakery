@@ -25,7 +25,6 @@ Usage:
 
 import argparse
 import contextlib
-import datetime
 import multiprocessing
 import os
 import queue as queue_module
@@ -33,41 +32,31 @@ import sys
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
+from tempfile import gettempdir
 
-# Settings live in describe_csv so there is one place to change them.
+from already_done import already_documented, outcome_from_previous_run
 from checkpoints import CheckpointStore
 from describe_csv import describe_csv
-from identifiers import IdentifierCheck
-from reporting import describe_size, print_report
+from identifiers import IdentifierCheck, names_worth_checking
+from parbaked_croissant import render_parbaked_markdown, write_parbaked_croissant
+from progress import ProgressDisplay, print_key
+from reporting import build_index, print_report
 from settings import (
     CHECKPOINT_DIRECTORY_NAME,
     CHECKPOINT_EVERY_ROWS,
-    CSV_SUFFIXES,
+    CROISSANT_SUBDIRECTORY,
+    DEFAULT_OUTPUT_DIRECTORY,
     DEFAULT_PREVIEW_ROWS,
     DEFAULT_VALUES_SHOWN,
     DEFAULT_VALUES_TRACKED,
+    INDEX_FILENAME,
+    MARKDOWN_SUBDIRECTORY,
+    TEXT_SUBDIRECTORY,
 )
 from sources import dataset_stem, estimate_row_count, matched_csv_suffix
-from parbaked_croissant import render_parbaked_markdown, write_parbaked_croissant
-from progress import ProgressDisplay, print_key
-
-DEFAULT_OUTPUT_DIRECTORY = "parbake_output"
-INDEX_FILENAME = "DIRECTORY_DOCUMENTATION.txt"
-
-# Output is sorted by kind, one subdirectory each, so a directory of fifty
-# datasets does not become a heap of a hundred and fifty files. Everything here
-# is par-baked -- unreviewed and machine-generated -- and the names say so.
-#
-# DIRECTORY_DOCUMENTATION.txt stays at the top level: it is the index to all
-# three, and filing it under one of them would be odd.
-CROISSANT_SUBDIRECTORY = "parbaked_croissants"     # .parbaked.json
-MARKDOWN_SUBDIRECTORY = "parbaked_markdown"        # .parbaked.md
-TEXT_SUBDIRECTORY = "parbaked_txt"                 # .txt, the readable reports
-
-OUTPUT_SUBDIRECTORIES = (
-    CROISSANT_SUBDIRECTORY, MARKDOWN_SUBDIRECTORY, TEXT_SUBDIRECTORY,
-)
+from staging import StagingArea, staged_copy
 
 # One worker per file, each in its own process. Reading a CSV is mostly pandas
 # doing CPU work, so threads would queue up behind each other; separate
@@ -101,13 +90,19 @@ def find_files(directory_to_scan):
 
 
 def describe_one_csv(csv_file, output_directory, settings, on_progress=None,
-                     checkpoints=None):
+                     checkpoints=None, record_as=None):
     """Describe one CSV and write its report next to the index.
+
+    record_as names the file to write down, when csv_file is a copy made on
+    faster storage. Everything the run leaves behind -- the report, the index,
+    the Croissant -- has to name the original, because the copy is deleted as
+    soon as it has been read.
 
     Returns a dictionary summarising how it went, so the index can say what
     happened to every file -- including the ones that failed.
     """
-    stem = dataset_stem(csv_file)
+    recorded_file = record_as if record_as is not None else csv_file
+    stem = dataset_stem(recorded_file)
     report_path = output_directory / TEXT_SUBDIRECTORY / f"{stem}.txt"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -121,17 +116,18 @@ def describe_one_csv(csv_file, output_directory, settings, on_progress=None,
             identifier_check=None if settings["skip_identifier_check"] else IdentifierCheck(),
             on_progress=on_progress,
             checkpoints=checkpoints,
+            record_as=recorded_file,
         )
     except Exception as problem:
         # One unreadable file must not stop the rest of the directory. The
         # reason is written out in full so it can be diagnosed later.
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(
-            f"Could not read {csv_file}\n\n{traceback.format_exc()}",
+            f"Could not read {recorded_file}\n\n{traceback.format_exc()}",
             encoding="utf-8",
         )
         return {
-            "file": csv_file,
+            "file": recorded_file,
             "ok": False,
             "problem": f"{type(problem).__name__}: {problem}",
             "report_path": report_path,
@@ -161,11 +157,7 @@ def describe_one_csv(csv_file, output_directory, settings, on_progress=None,
         except Exception as problem:
             croissant_problem = f"{type(problem).__name__}: {problem}"
 
-    concerns = [
-        entry["column_name"]
-        for entry in result["identifiers"]["columns_of_concern"]
-        if "NOT consistent" in entry["verdict"] or "path" in entry["verdict"]
-    ]
+    concerns = names_worth_checking(result["identifiers"]["columns_of_concern"])
     # Columns carrying nothing. Worth surfacing in the index: a file where a
     # third of the columns are empty or constant is a different proposition
     # from one where none are, and you should not have to open a report to see it.
@@ -175,7 +167,7 @@ def describe_one_csv(csv_file, output_directory, settings, on_progress=None,
                         if column["holds_one_value"] and not column["is_all_empty"]]
 
     return {
-        "file": csv_file,
+        "file": recorded_file,
         "ok": True,
         "rows_read": result["file"]["rows_read"],
         "column_count": result["file"]["column_count"],
@@ -189,83 +181,6 @@ def describe_one_csv(csv_file, output_directory, settings, on_progress=None,
         "markdown_path": markdown_path,
         "croissant_problem": croissant_problem,
     }
-
-
-def build_index(directory_to_scan, results, other_files, settings):
-    """Build the text of DIRECTORY_DOCUMENTATION.txt."""
-    scanned_at = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-
-    lines = [
-        "# DIRECTORY DOCUMENTATION",
-        "",
-        f"Directory scanned: {directory_to_scan}",
-        f"Scanned at:        {scanned_at}",
-        f"Read:              {settings['scope_description']}",
-        "",
-        f"# CSV files ({len(results)})",
-        "",
-    ]
-
-    if not results:
-        lines.append("  (none)")
-    for outcome in results:
-        name = outcome["file"].name
-        size = describe_size(outcome["file"].stat().st_size)
-        # Each file's entry runs to several lines, so they need separating or
-        # one file's detail reads as the next file's heading.
-        if lines[-1] != "":
-            lines.append("")
-        if not outcome["ok"]:
-            lines.append(f"  {name}  ({size})")
-            lines.append(f"      COULD NOT READ: {outcome['problem']}")
-            lines.append(f"      details in {outcome['report_path'].name}")
-            continue
-        lines.append(f"  {name}  ({size})")
-        lines.append(
-            f"      {outcome['rows_read']:,} rows read, {outcome['column_count']} columns"
-            f", {outcome['seconds']}s -- {outcome['scope']}"
-        )
-        if outcome["columns_to_check"]:
-            lines.append(
-                f"      check before sharing: {', '.join(outcome['columns_to_check'])}"
-            )
-        if outcome["empty_columns"]:
-            lines.append(
-                f"      empty in every row ({len(outcome['empty_columns'])}): "
-                f"{', '.join(outcome['empty_columns'])}"
-            )
-        if outcome["constant_columns"]:
-            lines.append(
-                f"      one value covers 99%+ of rows "
-                f"({len(outcome['constant_columns'])}): "
-                f"{', '.join(outcome['constant_columns'])}"
-            )
-        lines.append(
-            f"      described in {TEXT_SUBDIRECTORY}/{outcome['report_path'].name}")
-        if outcome.get("croissant_path"):
-            lines.append(
-                f"      par-baked croissant: {CROISSANT_SUBDIRECTORY}/"
-                f"{outcome['croissant_path'].name}"
-                f" -- NOT REVIEWED, fails validation on purpose"
-            )
-            if outcome.get("markdown_path"):
-                lines.append(
-                    f"      rendered as: {MARKDOWN_SUBDIRECTORY}/"
-                    f"{outcome['markdown_path'].name}")
-        if outcome.get("croissant_problem"):
-            lines.append(f"      croissant NOT written: {outcome['croissant_problem']}")
-    lines.append("")
-
-    lines.append(f"# Other files, not examined ({len(other_files)})")
-    lines.append("")
-    if other_files:
-        for other_file in other_files:
-            lines.append(f"  {other_file.name}  ({describe_size(other_file.stat().st_size)})")
-    else:
-        lines.append("  (none)")
-    lines.append("")
-
-    return "\n".join(lines)
 
 
 def worker_count(requested, file_count):
@@ -285,22 +200,53 @@ def _describe_in_worker(job):
     Progress goes back to the parent over a queue rather than being printed
     here: several workers writing to the same terminal at once would interleave
     into nonsense.
+
+    When a staging directory is given, this worker copies its own file there,
+    reads the copy, and deletes it before returning -- so it takes its next
+    file the moment it is ready, without waiting for any other worker.
     """
     (csv_file, output_directory, settings, progress_queue,
-     checkpoint_directory, checkpoint_every) = job
+     checkpoint_directory, checkpoint_every, staging_root) = job
+
+    if staging_root is None:
+        return _describe_and_report(csv_file, None, job)
+
+    progress_queue.put(("copying", csv_file.name, 0, 0.0))
+    with staged_copy(staging_root, csv_file) as (read_path, problem):
+        # Estimating from the local copy costs a fraction of what it costs over
+        # a filesystem where every open is a round trip, which is why the run
+        # did not do it up front.
+        progress_queue.put(
+            ("estimate", csv_file.name, estimated_rows_for(read_path, settings), 0.0))
+        outcome = _describe_and_report(read_path, csv_file, job)
+
+    if problem is not None:
+        outcome["staging_problem"] = f"{type(problem).__name__}: {problem}"
+    return outcome
+
+
+def _describe_and_report(read_path, record_as, job):
+    """Read one file, sending progress back to the parent as it goes."""
+    (csv_file, output_directory, settings, progress_queue,
+     checkpoint_directory, checkpoint_every, _staging_root) = job
+
+    # The display is keyed by the name of the file the user asked for, which is
+    # not the file being read when a local copy was made.
+    shown_name = csv_file.name
 
     def report(rows_read, seconds):
-        progress_queue.put(("progress", csv_file.name, rows_read, seconds))
+        progress_queue.put(("progress", shown_name, rows_read, seconds))
 
-    progress_queue.put(("start", csv_file.name, 0, 0.0))
+    progress_queue.put(("start", shown_name, 0, 0.0))
     # Built inside the worker: a CheckpointStore is cheap to make and this keeps
     # the job tuple to plain data that pickles without fuss.
     checkpoints = CheckpointStore(checkpoint_directory,
                                   enabled=checkpoint_directory is not None,
                                   every_rows=checkpoint_every)
-    outcome = describe_one_csv(csv_file, output_directory, settings,
-                               on_progress=report, checkpoints=checkpoints)
-    progress_queue.put(("finished", csv_file.name, outcome, 0.0))
+    outcome = describe_one_csv(read_path, output_directory, settings,
+                               on_progress=report, checkpoints=checkpoints,
+                               record_as=record_as)
+    progress_queue.put(("finished", shown_name, outcome, 0.0))
     return outcome
 
 
@@ -308,7 +254,13 @@ def _apply_message(display, message):
     """Fold one message from a worker into the display."""
     kind, name, payload, seconds = message
 
-    if kind == "start":
+    if kind == "copying":
+        display.update(name, state="copying")
+    elif kind == "estimate":
+        # Only sent when the file was copied locally; otherwise the parent
+        # worked the estimate out before the run started.
+        display.update(name, estimated_rows=payload)
+    elif kind == "start":
         display.update(name, state="reading")
     elif kind == "progress":
         display.update(name, state="reading", rows_read=payload, seconds=seconds)
@@ -333,29 +285,55 @@ def summarise_outcome(outcome):
     return ", ".join(parts)
 
 
-def run_in_parallel(csv_files, output_directory, settings, workers, display,
-                    checkpoint_directory=None, checkpoint_every=CHECKPOINT_EVERY_ROWS):
-    """Describe every file, several at a time, updating the display as they go."""
-    results_by_name = {}
+def estimated_rows_for(path, settings):
+    """Roughly how many rows this file will yield, for the progress bar.
 
-    # "fork" is the default on Linux but is unsafe here: the manager below runs
-    # a thread, and forking a multi-threaded process can deadlock the child.
-    # Python 3.12 warns about it and 3.14 changes the default. "forkserver"
-    # forks from a clean single-threaded helper, which is both safe and quicker
-    # to start than "spawn"; not every platform has it, so fall back.
+    A preview never reads past its row limit, so that is the target when one is
+    set. Returns None when the file is too small or too odd to guess from, which
+    the display shows as a "?" bar rather than a percentage.
+    """
+    estimate = estimate_row_count(path)
+    if settings["preview_rows"] is not None and estimate is not None:
+        return min(estimate, settings["preview_rows"])
+    return estimate
+
+
+def _pool_context():
+    """The multiprocessing context workers are started from.
+
+    "fork" is the default on Linux but is unsafe here: the manager below runs a
+    thread, and forking a multi-threaded process can deadlock the child. Python
+    3.12 warns about it and 3.14 changes the default. "forkserver" forks from a
+    clean single-threaded helper, which is both safe and quicker to start than
+    "spawn"; not every platform has it, so fall back.
+    """
     try:
-        start_method = multiprocessing.get_context("forkserver")
+        return multiprocessing.get_context("forkserver")
     except ValueError:
-        start_method = multiprocessing.get_context("spawn")
+        return multiprocessing.get_context("spawn")
+
+
+def run_in_parallel(csv_files, output_directory, settings, workers, display,
+                    checkpoint_directory=None, checkpoint_every=CHECKPOINT_EVERY_ROWS,
+                    staging_root=None):
+    """Describe every file, several at a time, updating the display as they go.
+
+    Every file is handed to the pool at once and workers take the next one as
+    soon as they are free. With staging_root set each worker also copies its
+    own file before reading it, which keeps that cost off the critical path of
+    every other worker.
+    """
+    results_by_name = {}
+    context = _pool_context()
 
     # A managed queue can be passed to another process and written to from there.
-    with start_method.Manager() as manager:
+    with context.Manager() as manager:
         progress_queue = manager.Queue()
         jobs = [(csv_file, output_directory, settings, progress_queue,
-                 checkpoint_directory, checkpoint_every)
+                 checkpoint_directory, checkpoint_every, staging_root)
                 for csv_file in csv_files]
 
-        with ProcessPoolExecutor(max_workers=workers, mp_context=start_method) as pool:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
             futures = [pool.submit(_describe_in_worker, job) for job in jobs]
 
             while not all(future.done() for future in futures):
@@ -374,7 +352,8 @@ def run_in_parallel(csv_files, output_directory, settings, workers, display,
                     results_by_name[csv_file.name] = {
                         "file": csv_file, "ok": False,
                         "problem": f"worker failed: {type(problem).__name__}: {problem}",
-                        "report_path": output_directory / TEXT_SUBDIRECTORY / f"{dataset_stem(csv_file)}.txt",
+                        "report_path": (output_directory / TEXT_SUBDIRECTORY
+                                        / f"{dataset_stem(csv_file)}.txt"),
                     }
                     display.update(csv_file.name, state="failed",
                                    note=f"worker failed: {type(problem).__name__}")
@@ -393,12 +372,10 @@ def _drain(progress_queue, display):
 
 def run_one_at_a_time(csv_files, output_directory, settings, display,
                       checkpoint_directory=None,
-                      checkpoint_every=CHECKPOINT_EVERY_ROWS):
+                      checkpoint_every=CHECKPOINT_EVERY_ROWS, staging_root=None):
     """The same work in this process. Used with --workers 1, and easier to debug."""
     results = []
     for csv_file in csv_files:
-        display.update(csv_file.name, state="reading")
-        display.draw()
 
         def report(rows_read, seconds, name=csv_file.name):
             display.update(name, rows_read=rows_read, seconds=seconds)
@@ -407,29 +384,70 @@ def run_one_at_a_time(csv_files, output_directory, settings, display,
         checkpoints = CheckpointStore(checkpoint_directory,
                                       enabled=checkpoint_directory is not None,
                                       every_rows=checkpoint_every)
-        outcome = describe_one_csv(csv_file, output_directory, settings,
-                                   on_progress=report, checkpoints=checkpoints)
+
+        if staging_root is None:
+            display.update(csv_file.name, state="reading")
+            display.draw()
+            outcome = describe_one_csv(csv_file, output_directory, settings,
+                                       on_progress=report, checkpoints=checkpoints)
+        else:
+            display.update(csv_file.name, state="copying")
+            display.draw(force=True)
+            with staged_copy(staging_root, csv_file) as (read_path, problem):
+                display.update(csv_file.name, state="reading",
+                               estimated_rows=estimated_rows_for(read_path, settings))
+                display.draw()
+                outcome = describe_one_csv(read_path, output_directory, settings,
+                                           on_progress=report,
+                                           checkpoints=checkpoints,
+                                           record_as=csv_file)
+            if problem is not None:
+                outcome["staging_problem"] = f"{type(problem).__name__}: {problem}"
+
         _apply_message(display, ("finished", csv_file.name, outcome, 0.0))
         display.draw(force=True)
         results.append(outcome)
     return results
 
 
-def document_directory(directory_to_scan, output_directory, settings, workers=1,
-                       checkpoint_directory=None,
-                       checkpoint_every=CHECKPOINT_EVERY_ROWS):
-    """Document every CSV in a directory, and write the index.
+def _split_off_already_done(csv_files, output_directory, settings, skip_existing):
+    """Separate the files a previous run finished from the ones still to read.
 
-    Returns (results, other_files).
+    Decided here in the parent rather than in a worker, so a skipped file is
+    never opened, never copied, and never costs a round trip to the shared
+    filesystem -- which is the whole point of skipping it.
     """
-    output_directory.mkdir(parents=True, exist_ok=True)
-    csv_files, other_files = find_files(directory_to_scan)
+    if not skip_existing:
+        return csv_files, []
 
-    active_workers = worker_count(workers, len(csv_files)) if csv_files else 1
+    want_croissant = not settings["skip_croissant"]
+    still_to_do, skipped = [], []
+    for csv_file in csv_files:
+        if already_documented(output_directory, csv_file, want_croissant):
+            skipped.append(csv_file)
+        else:
+            still_to_do.append(csv_file)
+    return still_to_do, skipped
+
+
+def _announce(directory_to_scan, csv_files, skipped, other_files, settings,
+              active_workers, checkpoint_directory, stage_locally, staging_parent,
+              skip_existing):
+    """Say what is about to happen, before anything slow starts.
+
+    Printed up front on purpose: on a directory of a thousand files the first
+    real output is a while away, and a run that says nothing looks like a run
+    that has hung.
+    """
     print(f"Scanning {directory_to_scan}")
-    print(f"  {len(csv_files)} CSV file(s), {len(other_files)} other file(s)")
+    print(f"  {len(csv_files) + len(skipped)} CSV file(s), "
+          f"{len(other_files)} other file(s)")
+    if skip_existing:
+        print(f"  {len(skipped)} already documented, skipping "
+              f"{'them' if len(skipped) != 1 else 'it'}; {len(csv_files)} to read")
     print(f"  reading {settings['scope_description']}")
     print(f"  {active_workers} worker(s)")
+
     if checkpoint_directory:
         waiting = CheckpointStore(checkpoint_directory).outstanding()
         if waiting:
@@ -437,21 +455,60 @@ def document_directory(directory_to_scan, output_directory, settings, workers=1,
                   "files will carry on rather than start again")
     else:
         print("  checkpointing off")
+
+    if stage_locally:
+        where = staging_parent or os.environ.get("TMPDIR") or gettempdir()
+        print(f"  each worker copies its file to {where} first, reads it there, "
+              "then deletes it")
+        print(f"  so never more than {active_workers} "
+              f"{'copy' if active_workers == 1 else 'copies'} on local disk at once")
+
     print()
-    print_key()
+    print_key(staging=stage_locally)
     print()
+
+
+def document_directory(directory_to_scan, output_directory, settings, workers=1,
+                       checkpoint_directory=None,
+                       checkpoint_every=CHECKPOINT_EVERY_ROWS,
+                       stage_locally=False, staging_parent=None,
+                       skip_existing=False):
+    """Document every CSV in a directory, and write the index.
+
+    stage_locally has each worker copy its file to local disk before reading
+    it, for shared filesystems where opening a file is expensive. See staging.py.
+
+    skip_existing leaves alone any file whose output is already there, and
+    takes its index entry from the previous run. See already_done.py.
+
+    Returns (results, other_files).
+    """
+    output_directory.mkdir(parents=True, exist_ok=True)
+    csv_files, other_files = find_files(directory_to_scan)
+
+    every_csv_file = csv_files
+    csv_files, skipped = _split_off_already_done(
+        csv_files, output_directory, settings, skip_existing)
+
+    active_workers = worker_count(workers, len(csv_files)) if csv_files else 1
+    _announce(directory_to_scan, csv_files, skipped, other_files, settings,
+              active_workers, checkpoint_directory, stage_locally, staging_parent,
+              skip_existing)
 
     if not csv_files:
         results = []
     else:
-        # An estimate per file, so the bars have something to fill towards. For
-        # a preview the target is the row limit, which we know exactly.
+        # An estimate per file, so the bars have something to fill towards.
+        #
+        # When files are being copied locally each worker estimates its own,
+        # from the copy, and sends the number back. Estimating them all here
+        # first would mean opening every file over the slow filesystem before
+        # anything appeared on screen, which is the delay that mode exists to
+        # avoid. Those files start with a "?" bar and fill in as they begin.
         estimated_rows = {}
-        for csv_file in csv_files:
-            estimate = estimate_row_count(csv_file)
-            if settings["preview_rows"] is not None and estimate is not None:
-                estimate = min(estimate, settings["preview_rows"])
-            estimated_rows[csv_file.name] = estimate
+        if not stage_locally:
+            for csv_file in csv_files:
+                estimated_rows[csv_file.name] = estimated_rows_for(csv_file, settings)
 
         display = ProgressDisplay(
             [csv_file.name for csv_file in csv_files], estimated_rows,
@@ -459,16 +516,42 @@ def document_directory(directory_to_scan, output_directory, settings, workers=1,
         )
         display.draw(force=True)
 
-        if active_workers == 1:
-            results = run_one_at_a_time(csv_files, output_directory, settings,
-                                        display, checkpoint_directory,
-                                        checkpoint_every)
-        else:
-            results = run_in_parallel(
-                csv_files, output_directory, settings, active_workers, display,
-                checkpoint_directory, checkpoint_every,
-            )
+        # One staging directory for the whole run, made here so that this
+        # process is the one responsible for removing it. Workers copy into it
+        # and clear up after themselves; this catches whatever a killed worker
+        # could not.
+        with ExitStack() as cleanup:
+            staging_root = None
+            if stage_locally:
+                staging_root = cleanup.enter_context(StagingArea(staging_parent)).root
+
+            if active_workers == 1:
+                results = run_one_at_a_time(csv_files, output_directory, settings,
+                                            display, checkpoint_directory,
+                                            checkpoint_every, staging_root)
+            else:
+                results = run_in_parallel(
+                    csv_files, output_directory, settings, active_workers, display,
+                    checkpoint_directory, checkpoint_every, staging_root,
+                )
         display.finish()
+
+        for outcome in results:
+            if outcome.get("staging_problem"):
+                print(f"  could not copy {outcome['file'].name} locally, read it "
+                      f"in place ({outcome['staging_problem']})")
+
+    # Skipped files are kept out of the progress display -- there is no
+    # progress to show -- but they belong in the index, in the order they
+    # appear in the directory rather than bunched at one end.
+    if skipped:
+        want_croissant = not settings["skip_croissant"]
+        reused = {csv_file: outcome_from_previous_run(
+            output_directory, csv_file, want_croissant) for csv_file in skipped}
+        by_file = {outcome["file"]: outcome for outcome in results}
+        by_file.update(reused)
+        results = [by_file[csv_file] for csv_file in every_csv_file
+                   if csv_file in by_file]
 
     index_path = output_directory / INDEX_FILENAME
     index_path.write_text(
@@ -484,7 +567,12 @@ def document_directory(directory_to_scan, output_directory, settings, workers=1,
             pass                      # nothing left to resume, nothing to say
 
     print()
-    print(f"  {len(results) - len(failed)} of {len(results)} CSV file(s) described")
+    read_this_time = len(results) - len(failed) - len(skipped)
+    if skipped:
+        print(f"  {read_this_time} CSV file(s) read, {len(skipped)} skipped "
+              "as already documented")
+    else:
+        print(f"  {read_this_time} of {len(results)} CSV file(s) described")
     if failed:
         print(f"  {len(failed)} could not be read -- see the index")
     print(f"\nWrote {index_path}")
@@ -550,6 +638,32 @@ def main():
         help=f"where progress is saved (default: <out>/{CHECKPOINT_DIRECTORY_NAME}). "
              "Removed when every file has been described.",
     )
+    parser.add_argument(
+        "--skip-existing", action="store_true",
+        help="leave alone any file whose output is already in --out, and take "
+             "its index entry from the previous run. For carrying on after a "
+             "run was interrupted, or adding new files to a directory that has "
+             "already been documented. Off by default: normally every file is "
+             "read again and its output overwritten. Note that this looks only "
+             "at whether the output exists -- a file edited since it was "
+             "documented keeps its old description until read again.",
+    )
+    parser.add_argument(
+        "--batch-local-copies", action="store_true",
+        help="have each worker copy its file to local disk and read it there. "
+             "On a shared filesystem like Lustre, opening a file costs a round "
+             "trip to a metadata server, and a run over hundreds of files spends "
+             "most of its time waiting. A worker copies one file, reads it, and "
+             "deletes the copy before taking the next, so there are never more "
+             "copies -- or more readers on the shared filesystem -- than there "
+             "are workers. Off by default: on a local filesystem it is pure loss.",
+    )
+    parser.add_argument(
+        "--local-copy-dir", metavar="DIR", default=None,
+        help="where --batch-local-copies puts the copies (default: $TMPDIR, "
+             "which on a compute node is usually node-local storage). Each copy "
+             "is removed as soon as its file has been read.",
+    )
     arguments = parser.parse_args()
 
     directory_to_scan = Path(arguments.directory).resolve()
@@ -581,7 +695,10 @@ def main():
     document_directory(directory_to_scan, output_directory, settings,
                        workers=arguments.workers,
                        checkpoint_directory=checkpoint_directory,
-                       checkpoint_every=arguments.checkpoint_every)
+                       checkpoint_every=arguments.checkpoint_every,
+                       stage_locally=arguments.batch_local_copies,
+                       staging_parent=arguments.local_copy_dir,
+                       skip_existing=arguments.skip_existing)
 
 
 if __name__ == "__main__":

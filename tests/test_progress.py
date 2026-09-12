@@ -8,6 +8,7 @@ Run with:
 """
 
 import io
+import os
 
 import pytest
 
@@ -15,9 +16,9 @@ from progress import (
     BAR_WIDTH,
     FileProgress,
     ProgressDisplay,
-    format_duration,
+    describe_seconds,
     render_bar,
-    shorten_name,
+    truncate_start,
 )
 
 
@@ -51,18 +52,18 @@ def test_the_bar_cannot_overflow(fraction):
     (5, "5s"), (45, "45s"), (90, "1m30s"), (3700, "1h01m"), (7325, "2h02m"),
 ])
 def test_durations_stay_short(seconds, expected):
-    assert format_duration(seconds) == expected
+    assert describe_seconds(seconds) == expected
 
 
 def test_a_long_name_is_trimmed_from_the_left():
     """The end of a filename is the part that distinguishes it."""
-    trimmed = shorten_name("ANL-ALCF-DJC-POLARIS_20220809_20221231.csv", 25)
+    trimmed = truncate_start("ANL-ALCF-DJC-POLARIS_20220809_20221231.csv", 25)
     assert len(trimmed) == 25
     assert trimmed.endswith("20221231.csv")
 
 
 def test_a_short_name_is_left_alone():
-    assert shorten_name("jobs.csv", 25) == "jobs.csv"
+    assert truncate_start("jobs.csv", 25) == "jobs.csv"
 
 
 # --- one file's state -----------------------------------------------------
@@ -247,22 +248,54 @@ def test_the_key_prints_each_term_with_its_meaning():
 # --- the resource line ----------------------------------------------------
 
 def test_the_resource_line_reports_workers_memory_and_cpu():
-    from resources import resource_line, snapshot
+    from resources import ResourceMonitor
 
-    line = resource_line(snapshot(), workers=4)
+    line = ResourceMonitor().line(workers=4)
     assert "4 worker(s)" in line
     assert "in use" in line
-    assert "CPU used" in line
+    assert "cores busy" in line
 
 
 def test_the_worker_count_is_told_not_guessed():
     """The tree also holds a forkserver and a manager, which are not workers.
     Counting processes and calling them workers reported 2 for a 4-worker run."""
-    from resources import resource_line, snapshot
+    from resources import ResourceMonitor
 
-    reading = snapshot()
-    assert "4 worker(s)" in resource_line(reading, workers=4)
-    assert "process(es)" in resource_line(reading)      # honest when not told
+    assert "4 worker(s)" in ResourceMonitor().line(workers=4)
+    assert "process(es)" in ResourceMonitor().line()     # honest when not told
+
+
+def test_cpu_is_a_rate_not_a_running_total():
+    """Time used only ever goes up, so it says nothing about what the run is
+    doing now. Cores busy rises while reading and falls while waiting."""
+    import time
+
+    from resources import ResourceMonitor
+
+    monitor = ResourceMonitor()
+    assert monitor.sample()["cores_busy"] is None       # no rate from one sample
+
+    start = time.monotonic()
+    while time.monotonic() - start < 0.3:
+        sum(index * index for index in range(100_000))
+    busy = monitor.sample()["cores_busy"]
+    assert busy is not None and busy > 0.1, f"expected a core to look busy, got {busy}"
+
+    time.sleep(0.3)                                      # now do nothing
+    assert monitor.sample()["cores_busy"] < busy
+
+
+def test_a_worker_finishing_cannot_make_the_rate_negative():
+    """CPU is tracked per process. Summing the tree and diffing the totals would
+    go negative the moment a worker exited and took its time out of the sum."""
+    from resources import ResourceMonitor
+
+    monitor = ResourceMonitor()
+    monitor.sample()
+    monitor._cpu_by_pid[999_999] = 5.0      # a process that will not appear again
+    monitor._cpu_total = sum(monitor._cpu_by_pid.values())
+
+    assert monitor.sample()["cores_busy"] >= 0
 
 
 def test_the_resource_line_can_be_turned_off():
@@ -283,19 +316,18 @@ def test_the_resource_line_appears_above_the_bars():
     assert "a.csv" in lines[1]
 
 
-def test_reading_resources_for_a_process_that_has_gone_returns_nothing():
-    """Workers come and go between listing them and reading them."""
-    from resources import cpu_seconds, memory_bytes
+def test_a_process_that_has_gone_is_skipped_not_raised():
+    """Workers come and go between being listed and being read."""
+    from resources import ResourceMonitor, process_tree
 
-    gone = 999_999_999
-    assert memory_bytes(gone) is None
-    assert cpu_seconds(gone) is None
+    assert process_tree(999_999_999) == []      # no such process, no exception
+    assert ResourceMonitor(999_999_999).sample()["processes"] == 0
 
 
-def test_a_snapshot_counts_memory_across_the_tree():
-    from resources import snapshot
+def test_a_sample_counts_memory_across_the_tree():
+    from resources import ResourceMonitor
 
-    reading = snapshot()
+    reading = ResourceMonitor().sample()
     assert reading["processes"] >= 1
     assert reading["memory_bytes"] > 0
 
@@ -316,15 +348,153 @@ def test_the_tree_reaches_grandchildren_not_just_children():
     grandparent = subprocess.Popen(
         [sys.executable, "-c",
          "import subprocess,sys,time;"
-         "c=subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)']);"
+         "subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)']);"
          "time.sleep(5)"]
     )
     try:
         time.sleep(1.5)
-        found = process_tree(os.getpid())
-        # our own pid, the child, and the grandchild
+        found = [process.pid for process in process_tree(os.getpid())]
+
         assert grandparent.pid in found, "did not find the direct child"
         assert len(found) >= 3, f"grandchild missing; tree was {found}"
     finally:
         grandparent.kill()
         grandparent.wait()
+
+
+# --- more files than screen -----------------------------------------------
+#
+# Redrawing works by moving the cursor up over the previous frame. The cursor
+# cannot go above the top of the screen, so a frame taller than the terminal
+# leaves it in the wrong place and the display scrolls away every refresh --
+# which on a run over a thousand files looks like the screen flickering.
+
+def many_files(count=1226):
+    return [f"syslog-2024-{number:04d}.csv.gz" for number in range(count)]
+
+
+@pytest.fixture
+def short_terminal(monkeypatch):
+    """Pretend the terminal is 24 lines tall, whatever is running the tests."""
+    import progress
+    size = os.terminal_size((100, 24))
+    monkeypatch.setattr(progress.shutil, "get_terminal_size", lambda _fallback=None: size)
+    return 24
+
+
+def test_a_frame_never_grows_taller_than_the_terminal(short_terminal):
+    names = many_files()
+    stream = FakeTerminal()
+    display = ProgressDisplay(names, stream=stream, show_resources=False, workers=250)
+    display.draw(force=True)
+
+    assert stream.getvalue().count("\n") <= short_terminal
+
+
+def test_a_tall_frame_stays_bounded_as_the_run_progresses(short_terminal):
+    names = many_files()
+    stream = FakeTerminal()
+    display = ProgressDisplay(names, stream=stream, show_resources=False, workers=250)
+
+    for name in names[:400]:
+        display.update(name, state="done", rows_read=1000, note="66 cols")
+    for name in names[400:650]:
+        display.update(name, state="reading", rows_read=500)
+
+    stream.truncate(0)
+    stream.seek(0)
+    display.draw(force=True)
+    assert stream.getvalue().count("\n") <= short_terminal
+
+
+def test_every_file_is_still_accounted_for_when_most_are_hidden(short_terminal):
+    names = many_files()
+    stream = FakeTerminal()
+    display = ProgressDisplay(names, stream=stream, show_resources=False, workers=250)
+    for name in names[:400]:
+        display.update(name, state="done", rows_read=1000)
+    for name in names[400:650]:
+        display.update(name, state="reading", rows_read=500)
+
+    line = display.summary_line()
+    assert "1,226 files" in line
+    assert "400 done" in line
+    assert "250 reading" in line
+    assert "576 waiting" in line
+
+
+def test_a_short_list_is_shown_in_full_as_before(short_terminal):
+    """The windowing must not disturb runs that already fit on screen."""
+    stream = FakeTerminal()
+    display = ProgressDisplay(["a.csv", "b.csv", "c.csv"], stream=stream,
+                              show_resources=False)
+    display.draw(force=True)
+
+    written = [line for line in stream.getvalue().splitlines() if line.strip()]
+    assert len(written) == 3               # no summary line, no "more below"
+    assert not any("files:" in line for line in written)
+
+
+def test_one_slow_file_does_not_pin_the_display(short_terminal):
+    """A window chosen by position would sit on the straggler and look frozen.
+
+    File 0 is still being read while files 1-800 have come and gone and 801
+    onwards are live. The files moving right now have to be on screen.
+    """
+    names = many_files()
+    stream = FakeTerminal()
+    display = ProgressDisplay(names, stream=stream, show_resources=False, workers=250)
+
+    display.update(names[0], state="reading", rows_read=9_000_000)
+    for name in names[1:801]:
+        display.update(name, state="done", rows_read=1000)
+    for name in names[801:1051]:
+        display.update(name, state="reading", rows_read=500)
+
+    stream.truncate(0)
+    stream.seek(0)
+    display.draw(force=True)
+    written = stream.getvalue()
+
+    assert names[0] in written             # the straggler is still visible
+    assert names[801] in written           # and so is what is moving now
+    assert written.count("\n") <= short_terminal
+
+
+def test_finishing_files_are_shown_when_there_is_room(short_terminal):
+    """With few workers there is space left over; recent completions fill it."""
+    names = many_files()
+    stream = FakeTerminal()
+    display = ProgressDisplay(names, stream=stream, show_resources=False, workers=8)
+    for name in names[:1200]:
+        display.update(name, state="done", rows_read=1000, note="66 cols")
+    for name in names[1200:1206]:
+        display.update(name, state="reading", rows_read=77)
+
+    stream.truncate(0)
+    stream.seek(0)
+    display.draw(force=True)
+    written = stream.getvalue()
+
+    assert names[1200] in written          # being read
+    assert names[1199] in written          # finished most recently
+    assert "done" in written
+    assert written.count("\n") <= short_terminal
+
+
+def test_a_file_records_when_it_finished():
+    display = ProgressDisplay(["a.csv"], show_resources=False)
+    assert display.by_name["a.csv"].finished_at is None
+    display.update("a.csv", state="done")
+    assert display.by_name["a.csv"].finished_at is not None
+
+
+def test_the_resource_line_is_not_read_on_the_redraw_clock():
+    """Walking every worker's /proc five times a second is work not spent reading.
+
+    The two rates are deliberately different: the display redraws several times
+    a second, the resource figures are refreshed every few seconds.
+    """
+    from progress import REDRAW_SECONDS, RESOURCE_SECONDS
+    assert RESOURCE_SECONDS > REDRAW_SECONDS
+    assert RESOURCE_SECONDS >= 5.0

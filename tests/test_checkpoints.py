@@ -10,18 +10,14 @@ Run with:
 """
 
 import json
-import os
 import time
-from pathlib import Path
 
-import pandas
 import pytest
 
 from checkpoints import (
     CHECKPOINT_FORMAT,
     CheckpointStore,
     fingerprint_settings,
-    fingerprint_source,
 )
 from describe_csv import describe_csv
 from identifiers import IdentifierCheck

@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pandas
 
-from checkpoints import CheckpointStore, fingerprint_settings
+from checkpoints import fingerprint_settings
 from identifiers import IdentifierCheck
 from measuring import ColumnSummary
 from reporting import print_report
@@ -51,23 +51,7 @@ from settings import (
     DEFAULT_VALUES_TRACKED,
     LITERAL_READ_SETTINGS,
 )
-from sources import (
-    compression_of,
-    rows_per_batch,
-    dataset_stem,
-    estimate_row_count,
-    matched_csv_suffix,
-    read_header,
-)
-
-# Re-exported so `from describe_csv import ...` keeps working for the things
-# callers legitimately reach for. Everything else should be imported from the
-# module that owns it.
-__all__ = [
-    "ColumnSummary", "IdentifierCheck", "describe_csv", "dataset_stem",
-    "estimate_row_count", "matched_csv_suffix", "read_header", "print_report",
-]
-
+from sources import dataset_stem, read_header, rows_per_batch
 
 def describe_csv(
     path,
@@ -80,6 +64,7 @@ def describe_csv(
     on_progress=None,
     checkpoints=None,
     dataset_stem_override=None,
+    record_as=None,
 ):
     """Read a CSV and measure it.
 
@@ -94,6 +79,10 @@ def describe_csv(
 
     identifier_check is an optional IdentifierCheck. When given, it runs inside
     this same read -- no second pass over the file.
+
+    record_as names the file the report should describe, when that is not the
+    file being read -- used when a copy has been made on faster storage. The
+    copy is read; the original is what gets written down.
 
     Returns a dictionary describing the file and every column in it.
     """
@@ -175,10 +164,15 @@ def describe_csv(
         "checked": identifier_check is not None,
     }
 
+    # What to call the file in the report. Normally the file we read, but when
+    # a copy was made to read from, the report has to name the original -- the
+    # copy is temporary and will not be there when anyone reads this.
+    described = Path(record_as) if record_as is not None else path
+
     return {
         "file": {
-            "path": str(path.resolve()),
-            "size_in_bytes": path.stat().st_size,
+            "path": str(described.resolve()),
+            "size_in_bytes": described.stat().st_size,
             "column_names": column_names,
             "column_count": len(column_names),
             "rows_read": rows_read,

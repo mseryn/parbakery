@@ -209,6 +209,13 @@ def _provenance(result, generator_version):
         "scope": file_details["scope"],
         "rows_read": file_details["rows_read"],
         "rows_read_is_the_whole_file": file_details["scope"] == "full scan",
+        # The anonymity flags belong in the machine-readable record, not only
+        # in the prose report: they are the most consequential thing measured,
+        # and anything reading this file back needs to see them. "checked"
+        # says whether the check ran at all -- an empty list from a run that
+        # skipped the check does not mean there is nothing to find.
+        "anonymity_check_ran": result["identifiers"]["checked"],
+        "columns_of_concern": list(result["identifiers"]["columns_of_concern"]),
     }
 
 
