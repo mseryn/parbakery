@@ -20,7 +20,7 @@ requires-python = ">=3.9"
 [tool.pytest.ini_options]
 
 # Where to look for tests when you run `pytest` with no arguments.
-testpaths = ["tests"]
+testpaths = ["tests", "parsing_tools/tests"]
 
 # Where Python should look for our own code when running tests.
 #
