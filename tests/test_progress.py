@@ -8,6 +8,7 @@ Run with:
 """
 
 import io
+import re
 import os
 
 import pytest
@@ -120,6 +121,14 @@ class FakeTerminal(io.StringIO):
         return True
 
 
+CONTROL = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\r")
+
+
+def visible_lines(text):
+    """What a frame shows, with the cursor movement and clearing taken out."""
+    return [line for line in CONTROL.sub("", text).splitlines() if line.strip()]
+
+
 def test_the_display_has_one_line_per_file():
     stream = FakeTerminal()
     display = ProgressDisplay(["a.csv", "b.csv", "c.csv"], stream=stream,
@@ -127,7 +136,7 @@ def test_the_display_has_one_line_per_file():
     display.draw(force=True)
 
     written = stream.getvalue()
-    assert len([l for l in written.splitlines() if l.strip()]) == 3
+    assert len(visible_lines(written)) == 3
     for name in ("a.csv", "b.csv", "c.csv"):
         assert name in written
 
@@ -141,7 +150,7 @@ def test_redrawing_moves_the_cursor_back_up_over_the_last_frame():
 
     display.draw(force=True)
     first_frame = stream.getvalue()
-    assert "\x1b[" not in first_frame          # nothing to move back over yet
+    assert not re.search(r"\x1b\[\d+A", first_frame)   # nothing to move back over yet
 
     display.draw(force=True)
     assert "\x1b[2A" in stream.getvalue()      # up two lines, one per file
@@ -311,7 +320,7 @@ def test_the_resource_line_appears_above_the_bars():
                               workers=3)
     display.draw(force=True)
 
-    lines = [l for l in stream.getvalue().splitlines() if l.strip()]
+    lines = visible_lines(stream.getvalue())
     assert "3 worker(s)" in lines[0]
     assert "a.csv" in lines[1]
 
@@ -430,7 +439,7 @@ def test_a_short_list_is_shown_in_full_as_before(short_terminal):
                               show_resources=False)
     display.draw(force=True)
 
-    written = [line for line in stream.getvalue().splitlines() if line.strip()]
+    written = visible_lines(stream.getvalue())
     assert len(written) == 3               # no summary line, no "more below"
     assert not any("files:" in line for line in written)
 
@@ -498,3 +507,143 @@ def test_the_resource_line_is_not_read_on_the_redraw_clock():
     from progress import REDRAW_SECONDS, RESOURCE_SECONDS
     assert RESOURCE_SECONDS > REDRAW_SECONDS
     assert RESOURCE_SECONDS >= 5.0
+
+
+# --- fitting the terminal -------------------------------------------------
+#
+# A line wider than the terminal wraps onto a second row. The next redraw moves
+# the cursor up one row per line, lands short of the top, and leaves a copy of
+# the previous frame behind -- which is what "it blinks around and repeats
+# things" was, in an 80-column window. Measured before the fix: at 80 columns a
+# reading line was 89 characters and a finished line 121.
+
+LONG_NAMES = ["ANL-ALCF-MACHINESTATUS-THETAGPU_20200922_20201231.csv",
+              "aurora_crayex_telemetry_power_2024-05-02.csv",
+              "ANL-ALCF-DJC-POLARIS_20220809_20221231.csv"]
+
+
+def terminal_of(monkeypatch, columns, rows=24):
+    import progress
+    size = os.terminal_size((columns, rows))
+    monkeypatch.setattr(progress.shutil, "get_terminal_size", lambda _fallback=None: size)
+
+
+def busy_display(stream, workers=250):
+    display = ProgressDisplay(LONG_NAMES, stream=stream, show_resources=True, workers=workers)
+    display.update(LONG_NAMES[0], state="reading", rows_read=123_456_789,
+                   estimated_rows=500_000_000)
+    display.update(LONG_NAMES[1], state="done", rows_read=987_654_321, seconds=3725.0,
+                   note="266 cols, 190 constant, check 12, and a long note besides")
+    return display
+
+
+@pytest.mark.parametrize("columns", [60, 80, 100, 120, 160])
+def test_no_line_is_wider_than_the_terminal(monkeypatch, columns):
+    terminal_of(monkeypatch, columns)
+    stream = FakeTerminal()
+    busy_display(stream).draw(force=True)
+
+    for line in visible_lines(stream.getvalue()):
+        assert len(line) <= columns - 1, (columns, len(line), line)
+
+
+def test_the_bar_and_share_survive_in_a_narrow_terminal(monkeypatch):
+    """Names give way first, so the progress itself is what stays on screen."""
+    terminal_of(monkeypatch, 80)
+    stream = FakeTerminal()
+    busy_display(stream).draw(force=True)
+
+    reading = next(line for line in visible_lines(stream.getvalue()) if "[1/3]" in line)
+    assert "25%" in reading and "123,456,789 rows" in reading
+
+
+def test_a_finished_line_keeps_its_time_in_a_narrow_terminal(monkeypatch):
+    """Only the note, which has no fixed length, may be cut."""
+    terminal_of(monkeypatch, 80)
+    stream = FakeTerminal()
+    busy_display(stream).draw(force=True)
+
+    finished = next(line for line in visible_lines(stream.getvalue()) if "[2/3]" in line)
+    assert "987,654,321 rows" in finished
+    assert "1h" in finished                      # 3,725 seconds
+
+
+@pytest.mark.parametrize("columns", [80, 100, 120, 140, 160, 200])
+def test_a_note_is_cut_readably_or_left_out(monkeypatch, columns):
+    """Never a stub such as "4s…", which reads as part of the time."""
+    terminal_of(monkeypatch, columns)
+    stream = FakeTerminal()
+    busy_display(stream).draw(force=True)
+
+    finished = next(line for line in visible_lines(stream.getvalue()) if "[2/3]" in line)
+    note = finished.split("1h02m", 1)[1]
+    assert finished.count("1h02m") == 1
+    assert note == "" or note.startswith("  ")         # nothing glued to the time
+    shown = note.strip().rstrip("…")
+    assert shown == "" or len(shown) >= 7 or "…" not in note
+
+
+def test_fit_line_prefers_whole_fields():
+    from progress import fit_line
+    line = "  [1/3] a.csv  [####]   done   250,000 rows      4s  20 cols, 3 constant"
+    at_time = line.index("4s") + 2
+    assert fit_line(line, at_time) == line[:at_time]                 # ends on the time
+    assert fit_line(line, at_time + 3).endswith("4s")                # stub dropped
+    assert fit_line(line, at_time + 12) == line[:at_time + 11] + "…" # enough to show
+    assert fit_line(line, len(line)) == line
+    # A single space is inside the note, so a cut there still says it is cut.
+    inside = line.index("3 constant") - 1
+    assert fit_line(line, inside).endswith("…")
+
+
+def test_a_redraw_never_blanks_the_frame_before_writing_it(monkeypatch):
+    """Clearing the whole area and then writing showed the screen empty for a moment."""
+    terminal_of(monkeypatch, 100)
+    stream = FakeTerminal()
+    display = busy_display(stream)
+    display.draw(force=True)
+    stream.truncate(0)
+    stream.seek(0)
+    display.draw(force=True)
+
+    frame = stream.getvalue()
+    assert frame.index("\x1b[J") > frame.rindex("\n")     # only after the last line
+    assert frame.count("\x1b[K") == len(visible_lines(frame)) + 1   # every line, and the blank
+
+
+def test_a_narrowed_window_is_fitted_on_the_next_frame(monkeypatch):
+    terminal_of(monkeypatch, 160)
+    stream = FakeTerminal()
+    display = busy_display(stream)
+    display.draw(force=True)
+
+    terminal_of(monkeypatch, 70)
+    stream.truncate(0)
+    stream.seek(0)
+    display.draw(force=True)
+    assert max(len(line) for line in visible_lines(stream.getvalue())) <= 69
+
+
+def test_a_real_terminal_shows_each_file_once_after_many_frames(monkeypatch):
+    """The failure itself, through a terminal emulator: no frame is left behind."""
+    pyte = pytest.importorskip("pyte")
+    columns, rows = 80, 24
+    terminal_of(monkeypatch, columns, rows)
+    screen = pyte.Screen(columns, rows)
+    feed = pyte.Stream(screen)
+
+    stream = FakeTerminal()
+    display = busy_display(stream)
+    for step in range(40):
+        display.update(LONG_NAMES[0], rows_read=step * 10_000_000)
+        display.update(LONG_NAMES[2], state="reading", rows_read=step * 1_000,
+                       estimated_rows=100_000)
+        stream.truncate(0)
+        stream.seek(0)
+        display.draw(force=True)
+        feed.feed(stream.getvalue().replace("\n", "\r\n"))
+
+    shown = "\n".join(screen.display)
+    for index in (1, 2, 3):
+        assert shown.count(f"[{index}/3]") == 1, shown
+    assert shown.count("worker(s)") == 1

@@ -16,7 +16,7 @@ import shutil
 import sys
 import time
 
-from formatting import describe_seconds, truncate_start
+from formatting import describe_seconds, truncate_end, truncate_start
 from resources import REFRESH_SECONDS as RESOURCE_SECONDS, ResourceMonitor
 
 BAR_WIDTH = 20
@@ -31,6 +31,37 @@ EMPTY = "-"
 # re-rendering text, and on a run with hundreds of workers doing it on the
 # redraw clock means most of the time goes on measuring rather than working.
 REDRAW_SECONDS = 0.2
+
+
+# The least of a trailing field worth showing when it has to be cut. Less than
+# this and the field is left out, rather than ending the line in a stub like
+# "4s…" that looks like part of the time.
+SHORTEST_CUT_FIELD = 8
+
+
+def fit_line(line, limit):
+    """A display line cut to `limit` characters, at a field boundary where possible.
+
+    Fields in a display line are separated by at least two spaces. When the
+    limit falls between fields, the line ends at the last whole one. When it
+    falls inside the last field -- a finished file's note -- that field is cut
+    with an ellipsis if enough of it still shows, and otherwise left out.
+    """
+    if len(line) <= limit:
+        return line
+    cut = line[:limit]
+    # Between fields only on a run of two or more spaces. A single space is
+    # inside a field -- "20 cols, 3 constant" -- and cutting there would look
+    # like the whole of it.
+    around = line[max(0, limit - 1): limit + 1]
+    if around == "  " or line[limit: limit + 2] == "  " or cut.endswith("  "):
+        return cut.rstrip()
+    boundary = cut.rfind("  ")
+    if boundary < 0:
+        return truncate_end(line, limit)
+    if len(cut) - (boundary + 2) >= SHORTEST_CUT_FIELD:
+        return line[: limit - 1] + "…"
+    return cut[:boundary].rstrip()
 
 
 def render_bar(fraction, width=BAR_WIDTH):
@@ -149,10 +180,30 @@ class ProgressDisplay:
         self.lines_drawn = 0
         self.last_drawn_at = 0.0
 
-        width = shutil.get_terminal_size((100, 24)).columns
-        longest = max((len(name) for name in names), default=20)
-        # Leave room for the bar, counts and timing.
-        self.name_width = max(12, min(longest, width - 58))
+        self.longest_name = max((len(name) for name in names), default=20)
+        self.columns = shutil.get_terminal_size((100, 24)).columns
+        self.name_width = self.fit_names(self.columns)
+
+    def fit_names(self, columns):
+        """How wide the file name can be so a line fits in this many columns.
+
+        Measured from a real line with an empty name rather than assumed: the
+        bar, the share, the row count and the time take a fixed amount, and the
+        [n/total] label grows with the number of files. A line wider than the
+        terminal wraps onto a second row, the cursor is then moved back up too
+        few rows on the next redraw, and every frame leaves a copy of the last
+        one behind -- the display repeats itself down the screen.
+        """
+        total = len(self.files)
+        fixed = 0
+        # A finished line is a few characters longer than a reading one before
+        # its note starts. Fitting to the longer keeps the time on screen; only
+        # the note, which can be any length, is cut.
+        for state in ("reading", "done"):
+            sample = FileProgress("", estimated_rows=1)
+            sample.state = state
+            fixed = max(fixed, len(sample.line(total, total, 0)))
+        return max(12, min(self.longest_name, columns - 1 - fixed))
 
     def update(self, name, **changes):
         """Record what a worker told us. Does not draw."""
@@ -241,6 +292,12 @@ class ProgressDisplay:
             lines.append("")
 
         if self.can_redraw:
+            # A window can be resized mid-run, so its width is read every frame.
+            columns = shutil.get_terminal_size((100, 24)).columns
+            if columns != self.columns:
+                self.columns = columns
+                self.name_width = self.fit_names(columns)
+
             # Redrawing works by moving the cursor up over what was written
             # last time. The cursor cannot travel above the top of the screen,
             # so writing more lines than the terminal is tall leaves it in the
@@ -264,10 +321,22 @@ class ProgressDisplay:
             lines += self.window_of_file_lines(room - 1)
 
         if self.can_redraw:
+            # Every line is cut to one short of the width, so none wraps and the
+            # cursor movement below always lands back on the first line. The last
+            # column is left empty because some terminals wrap on a line that
+            # fills it exactly.
+            lines = [fit_line(line, self.columns - 1) for line in lines]
+
+            # Each line is written over the last frame's in place, clearing only
+            # what is left to its right, and anything below the new frame is
+            # cleared at the end. Clearing the whole area first and then writing
+            # it again showed the screen blank for a moment, five times a second.
+            frame = []
             if self.lines_drawn:
-                # Up N lines, then clear from there to the end of the screen.
-                self.stream.write(f"\033[{self.lines_drawn}A\033[J")
-            self.stream.write("\n".join(lines) + "\n")
+                frame.append(f"\033[{self.lines_drawn}A")
+            frame += [f"\r{line}\033[K\n" for line in lines]
+            frame.append("\033[J")
+            self.stream.write("".join(frame))
             self.lines_drawn = len(lines)
         else:
             # Not a terminal: only say something when a file finishes, or the
