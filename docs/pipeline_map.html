@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>parbake Pipeline Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #F2F4F7;
+    --surface: #FFFFFF;
+    --surface-2: #E9EDF2;
+    --ink: #17212C;
+    --muted: #5A6673;
+    --rule: #C9D1D9;
+    --rule-strong: #9AA6B2;
+    --accent: #2656A6;
+    --accent-soft: #DDE7F6;
+    --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0F151C;
+      --surface: #17202A;
+      --surface-2: #1D2833;
+      --ink: #DDE5EC;
+      --muted: #8E9BA8;
+      --rule: #2D3A47;
+      --rule-strong: #4A5968;
+      --accent: #8AB0F0;
+      --accent-soft: #1C2D45;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0F151C;
+    --surface: #17202A;
+    --surface-2: #1D2833;
+    --ink: #DDE5EC;
+    --muted: #8E9BA8;
+    --rule: #2D3A47;
+    --rule-strong: #4A5968;
+    --accent: #8AB0F0;
+    --accent-soft: #1C2D45;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.55;
+    padding-inline: 24px;
+    padding-block: 40px 72px;
+  }
+  main { max-width: 1180px; margin: 0 auto; display: grid; gap: 56px; }
+
+  header { display: grid; gap: 12px; max-width: 70ch; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  h1, h2 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    text-wrap: balance;
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+  h1 { font-size: 2.5rem; line-height: 1.1; }
+  h2 { font-size: 1.55rem; line-height: 1.2; }
+  p { margin: 0; }
+  .lede { color: var(--muted); font-size: 1.05rem; max-width: 66ch; }
+  code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+  section { display: grid; gap: 16px; }
+  .section-intro { color: var(--muted); max-width: 70ch; }
+
+  figure { margin: 0; display: grid; gap: 12px; }
+  .scroll { overflow-x: auto; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding-block: 16px; }
+  .scroll svg { display: block; width: 100%; min-width: 960px; height: auto; color: var(--ink); }
+  figcaption { color: var(--muted); font-size: 0.9rem; max-width: 80ch; }
+  figcaption strong { color: var(--ink); font-weight: 600; }
+
+  /* drawing */
+  .node { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1; }
+  .group { fill: var(--surface-2); stroke: var(--rule-strong); stroke-width: 1; }
+  .region { fill: var(--ground); stroke: var(--accent); stroke-width: 1.25; stroke-dasharray: 7 5; }
+  .region-behind { fill: var(--ground); stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 7 5; }
+  .folder { fill: none; stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 2 4; }
+  .file { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+  .edge { fill: none; stroke: var(--muted); stroke-width: 1.25; }
+  .edge-accent { stroke: var(--accent); }
+  .edge-dashed { stroke-dasharray: 5 4; }
+  .t-name { font-family: var(--font-mono); font-size: 12px; font-weight: 600; fill: var(--ink); }
+  .t-title { font-family: var(--font-body); font-size: 13px; font-weight: 600; fill: var(--ink); }
+  .t-sub { font-family: var(--font-body); font-size: 11px; fill: var(--muted); }
+  .t-file { font-family: var(--font-mono); font-size: 11px; fill: var(--ink); }
+  .t-region { font-family: var(--font-mono); font-size: 11px; font-weight: 500; fill: var(--accent); }
+  .t-folder { font-family: var(--font-mono); font-size: 12px; font-weight: 600; fill: var(--ink); }
+  .t-label { font-family: var(--font-body); font-size: 11px; fill: var(--muted); }
+  .t-label-accent { font-family: var(--font-body); font-size: 11px; fill: var(--accent); }
+  .m-ink path { fill: var(--muted); }
+  .m-accent path { fill: var(--accent); }
+
+  /* properties */
+  .properties {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 28px;
+  }
+  .property { display: grid; gap: 8px; align-content: start; border-top: 2px solid var(--ink); padding-top: 12px; }
+  .property h3 {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .property ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+  .property li::marker { color: var(--rule-strong); }
+
+  /* matrix */
+  .matrix-wrap { overflow-x: auto; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+  table.matrix { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .matrix th, .matrix td { border-bottom: 1px solid var(--rule); }
+  .matrix thead th {
+    vertical-align: bottom;
+    padding: 12px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .matrix thead th.col span {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    display: inline-block;
+    white-space: nowrap;
+  }
+  .matrix thead th.col { width: 30px; text-align: center; }
+  .matrix thead th.external span { color: var(--muted); }
+  .matrix th.corner { text-align: left; font-family: var(--font-body); font-size: 12px; color: var(--muted); padding-right: 16px; }
+  .matrix tbody th {
+    text-align: left;
+    padding: 7px 18px 7px 0;
+    white-space: nowrap;
+    font-weight: 400;
+  }
+  .matrix tbody th .mname { font-family: var(--font-mono); font-size: 13px; font-weight: 600; display: block; }
+  .matrix tbody th .mrole { font-size: 12px; color: var(--muted); display: block; }
+  .matrix td { text-align: center; width: 30px; padding: 0; }
+  .matrix td.diagonal { background: var(--surface-2); }
+  .matrix td.first-external, .matrix th.first-external { border-left: 1px solid var(--rule-strong); }
+  .dot { display: inline-block; width: 11px; height: 11px; border-radius: 2px; background: var(--accent); vertical-align: middle; }
+  .dot.external { background: var(--rule-strong); }
+  .matrix tfoot th, .matrix tfoot td { padding: 10px 0; font-size: 12px; color: var(--muted); border-bottom: none; }
+  .matrix tfoot th { text-align: left; font-weight: 500; }
+
+  /* commands */
+  .keys-wrap { overflow-x: auto; }
+  .keys { width: 100%; border-collapse: collapse; }
+  .keys th, .keys td { text-align: left; padding: 8px 16px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  .keys thead th { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .keys td:first-child { font-family: var(--font-mono); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .keys td:nth-child(2) { font-family: var(--font-mono); font-size: 13px; white-space: nowrap; color: var(--muted); }
+  .keys tbody.program th {
+    padding-top: 20px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    border-bottom: 2px solid var(--ink);
+  }
+
+  /* claude chat */
+  .paste { display: grid; gap: 12px; }
+  .paste-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  button {
+    font-family: var(--font-body);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ground);
+    background: var(--ink);
+    border: 0;
+    border-radius: 4px;
+    padding: 8px 16px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  #copy-status { color: var(--muted); font-size: 14px; }
+  pre {
+    margin: 0;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink);
+    max-height: 520px;
+  }
+
+  @media (max-width: 640px) {
+    h1 { font-size: 2rem; }
+    body { padding-block: 28px 56px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="eyebrow">parbake · architecture</span>
+    <h1>parbake pipeline map</h1>
+    <p class="lede">parbake measures every CSV in a directory and writes a report, a par-baked Croissant and an index. These drawings show where each step runs, what it writes, and which module depends on which.</p>
+  </header>
+
+  <section aria-labelledby="run-heading">
+    <h2 id="run-heading">One run</h2>
+    <figure>
+      <div class="scroll">
+        <svg viewBox="0 0 1100 752" role="img" aria-label="A parbake run: the parent process lists the directory, skips finished files and starts one worker process per file. Each worker optionally copies its file locally, then describe_csv loads any checkpoint, reads batches, updates column totals and saves a checkpoint every million rows until the file ends, and deletes the checkpoint. The worker writes the report and the par-baked Croissant; workers report progress to the parent over a queue; after the last file the parent writes the directory index.">
+          <defs>
+            <marker id="arrow" class="m-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="arrow-accent" class="m-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- input -->
+          <rect class="node" x="16" y="62" width="150" height="130" rx="3"/>
+          <text class="t-title" x="91" y="87" text-anchor="middle">data directory</text>
+          <text class="t-file" x="91" y="111" text-anchor="middle">*.csv  *.csv.gz</text>
+          <text class="t-file" x="91" y="126" text-anchor="middle">*.csv.bz2  *.csv.xz</text>
+          <text class="t-sub" x="91" y="152" text-anchor="middle">other files: named in</text>
+          <text class="t-sub" x="91" y="166" text-anchor="middle">the index, never read</text>
+          <text class="t-sub" x="91" y="180" text-anchor="middle">top level only</text>
+          <line class="edge" x1="166" y1="85" x2="204" y2="85" marker-end="url(#arrow)"/>
+
+          <!-- parent process -->
+          <rect class="region" x="186" y="30" width="220" height="642" rx="6"/>
+          <text class="t-region" x="198" y="48">parent process</text>
+
+          <rect class="node" x="206" y="62" width="180" height="46" rx="3"/>
+          <text class="t-name" x="296" y="81" text-anchor="middle">parbakery.py</text>
+          <text class="t-sub" x="296" y="97" text-anchor="middle">command line, finds files</text>
+          <line class="edge" x1="296" y1="108" x2="296" y2="122" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="206" y="124" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="140" text-anchor="middle">already_done</text>
+          <text class="t-sub" x="296" y="155" text-anchor="middle">--skip-existing: skip finished</text>
+          <line class="edge" x1="296" y1="164" x2="296" y2="178" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="206" y="180" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="196" text-anchor="middle">worker_count · pool</text>
+          <text class="t-sub" x="296" y="211" text-anchor="middle">one process per file, up to 8</text>
+          <line class="edge" x1="296" y1="220" x2="296" y2="234" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="206" y="236" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="252" text-anchor="middle">progress · resources</text>
+          <text class="t-sub" x="296" y="267" text-anchor="middle">draws what workers report</text>
+
+          <line class="edge" x1="296" y1="276" x2="296" y2="610" marker-end="url(#arrow)"/>
+          <text class="t-label" x="306" y="436">after the last</text>
+          <text class="t-label" x="306" y="450">file finishes</text>
+
+          <rect class="node" x="206" y="612" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="628" text-anchor="middle">reporting.build_index</text>
+          <text class="t-sub" x="296" y="643" text-anchor="middle">the directory index</text>
+
+          <!-- worker process -->
+          <rect class="region-behind" x="494" y="122" width="360" height="542" rx="6"/>
+          <rect class="region" x="486" y="130" width="360" height="542" rx="6"/>
+          <text class="t-region" x="498" y="148">worker process · one per file</text>
+
+          <line class="edge edge-accent" x1="386" y1="200" x2="514" y2="200" marker-end="url(#arrow-accent)"/>
+          <text class="t-label-accent" x="446" y="215" text-anchor="middle">one job</text>
+          <text class="t-label-accent" x="446" y="228" text-anchor="middle">per file</text>
+
+          <rect class="node" x="516" y="180" width="300" height="40" rx="3"/>
+          <text class="t-name" x="666" y="196" text-anchor="middle">staging</text>
+          <text class="t-sub" x="666" y="211" text-anchor="middle">with --batch-local-copies: read a local copy</text>
+          <line class="edge" x1="666" y1="220" x2="666" y2="234" marker-end="url(#arrow)"/>
+
+          <rect class="group" x="500" y="236" width="332" height="304" rx="4"/>
+          <text class="t-name" x="516" y="256">describe_csv.py</text>
+
+          <line class="edge edge-accent edge-dashed" x1="500" y1="256" x2="388" y2="256" marker-end="url(#arrow-accent)"/>
+          <text class="t-label-accent" x="446" y="271" text-anchor="middle">progress</text>
+          <text class="t-label-accent" x="446" y="284" text-anchor="middle">over a queue</text>
+
+          <rect class="node" x="530" y="270" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="284" text-anchor="middle">checkpoints.load</text>
+          <text class="t-sub" x="671" y="298" text-anchor="middle">resume if file and settings unchanged</text>
+          <line class="edge" x1="671" y1="304" x2="671" y2="318" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="530" y="320" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="334" text-anchor="middle">sources · pandas.read_csv</text>
+          <text class="t-sub" x="671" y="348" text-anchor="middle">next batch, read as text</text>
+          <line class="edge" x1="671" y1="354" x2="671" y2="368" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="530" y="370" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="384" text-anchor="middle">measuring · identifiers</text>
+          <text class="t-sub" x="671" y="398" text-anchor="middle">update the per-column totals</text>
+          <line class="edge" x1="671" y1="404" x2="671" y2="418" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="530" y="420" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="434" text-anchor="middle">checkpoints.save</text>
+          <text class="t-sub" x="671" y="448" text-anchor="middle">every 1,000,000 rows</text>
+
+          <path class="edge" d="M530,437 H514 V337 H528" marker-end="url(#arrow)"/>
+          <line class="edge" x1="671" y1="454" x2="671" y2="488" marker-end="url(#arrow)"/>
+          <text class="t-label" x="684" y="475">at end of file or preview limit</text>
+
+          <rect class="node" x="530" y="490" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="504" text-anchor="middle">checkpoints.discard</text>
+          <text class="t-sub" x="671" y="518" text-anchor="middle">file finished: delete its checkpoint</text>
+
+          <line class="edge" x1="666" y1="540" x2="666" y2="548" marker-end="url(#arrow)"/>
+          <rect class="node" x="516" y="550" width="300" height="40" rx="3"/>
+          <text class="t-name" x="666" y="566" text-anchor="middle">reporting.print_report</text>
+          <text class="t-sub" x="666" y="581" text-anchor="middle">the per-file report</text>
+          <line class="edge" x1="666" y1="590" x2="666" y2="604" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="516" y="606" width="300" height="40" rx="3"/>
+          <text class="t-name" x="666" y="622" text-anchor="middle">parbaked_croissant</text>
+          <text class="t-sub" x="666" y="637" text-anchor="middle">the par-baked Croissant and its Markdown</text>
+
+          <!-- output folder -->
+          <rect class="folder" x="876" y="30" width="214" height="712" rx="6"/>
+          <text class="t-folder" x="888" y="48">&lt;out&gt;/</text>
+
+          <rect class="file" x="886" y="340" width="194" height="44" rx="3"/>
+          <text class="t-file" x="896" y="358">.parbake_checkpoints/</text>
+          <text class="t-sub" x="896" y="374">&lt;name&gt;.checkpoint.json</text>
+          <path class="edge" d="M884,352 H852 V287 H814" marker-end="url(#arrow)"/>
+          <path class="edge" d="M812,437 H864 V372 H882" marker-end="url(#arrow)"/>
+
+          <rect class="file" x="886" y="550" width="194" height="40" rx="3"/>
+          <text class="t-file" x="896" y="566">parbaked_txt/</text>
+          <text class="t-sub" x="896" y="581">&lt;name&gt;.txt</text>
+          <line class="edge" x1="816" y1="570" x2="882" y2="570" marker-end="url(#arrow)"/>
+
+          <rect class="file" x="886" y="600" width="194" height="40" rx="3"/>
+          <text class="t-file" x="896" y="616">parbaked_croissants/</text>
+          <text class="t-sub" x="896" y="631">&lt;name&gt;.parbaked.json</text>
+
+          <rect class="file" x="886" y="648" width="194" height="40" rx="3"/>
+          <text class="t-file" x="896" y="664">parbaked_markdown/</text>
+          <text class="t-sub" x="896" y="679">&lt;name&gt;.parbaked.md</text>
+          <path class="edge" d="M816,626 H856 V620 H882" marker-end="url(#arrow)"/>
+          <path class="edge" d="M856,626 V668 H882" marker-end="url(#arrow)"/>
+
+          <rect class="file" x="886" y="700" width="194" height="36" rx="3"/>
+          <text class="t-file" x="896" y="723">DIRECTORY_DOCUMENTATION.txt</text>
+          <path class="edge" d="M386,632 H446 V718 H882" marker-end="url(#arrow)"/>
+          <text class="t-label" x="666" y="711" text-anchor="middle">writes the index</text>
+        </svg>
+      </div>
+      <figcaption><strong>Everything inside a dashed blue outline runs in its own process</strong>, and blue arrows are the only things that cross between processes: the parent hands each worker one file, and each worker sends progress back over a queue. Workers never print. A file is never split across workers, and checkpoints only record progress through a single file.</figcaption>
+    </figure>
+  </section>
+
+  <section aria-labelledby="properties-heading">
+    <h2 id="properties-heading">What the design guarantees</h2>
+    <div class="properties">
+      <div class="property">
+        <h3>Scaling</h3>
+        <ul>
+          <li>One worker process per file; <code>--workers</code>, default up to 8, capped by CPU and file count.</li>
+          <li>Memory is bounded per batch (about 1,000,000 cells) and by the 1,000 distinct values tracked per column, not by file size.</li>
+          <li>A file is never split: capped value tables merged from pieces would change with the worker count.</li>
+          <li><code>--batch-local-copies</code>: each worker copies its own file to local disk, for filesystems where opening files is slow.</li>
+        </ul>
+      </div>
+      <div class="property">
+        <h3>Fault tolerance</h3>
+        <ul>
+          <li>A file that fails to read, or a worker that dies, is recorded as failed; the run continues.</li>
+          <li>Checkpoints every 1,000,000 rows, written to a temporary file then renamed into place.</li>
+          <li>Resume only when format version, file size, modification time and measurement settings all match. A resumed read gives the same measurements as an uninterrupted one.</li>
+          <li><code>--skip-existing</code> skips files whose outputs exist. It does not detect a changed file.</li>
+        </ul>
+      </div>
+      <div class="property">
+        <h3>Reading and parsing</h3>
+        <ul>
+          <li>CSV only, plain or gzip, bzip2, xz compressed. Preview of 1,000 rows by default; <code>--full</code> reads everything.</li>
+          <li>Values read as text; <code>NA</code> stays <code>NA</code>. Numbers are measured on a copy.</li>
+          <li>Other formats are converted to CSV first by tools in <code>parsing_tools/</code>.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="commands-heading">
+    <h2 id="commands-heading">Commands and options</h2>
+    <p class="section-intro">Every program in parbake and its options. parbake has no interactive screens; everything is set on the command line.</p>
+    <div class="keys-wrap">
+      <table class="keys">
+        <thead><tr><th scope="col">command or option</th><th scope="col">argument</th><th scope="col">does</th></tr></thead>
+        <tbody class="program"><tr><th scope="colgroup" colspan="3">parbakery.py</th></tr></tbody>
+        <tbody>
+          <tr><td>parbakery.py</td><td>[DIRECTORY]</td><td>Measures every CSV directly inside DIRECTORY. Default: the current directory.</td></tr>
+          <tr><td>--out</td><td>DIR</td><td>Where the outputs go. Default: <code>./parbake_output</code>.</td></tr>
+          <tr><td>--preview</td><td>[N]</td><td>Reads the first N rows of each file. This is the default, with N = 1,000.</td></tr>
+          <tr><td>--full</td><td></td><td>Reads every file to the end, instead of a preview.</td></tr>
+          <tr><td>--workers</td><td>N</td><td>Files read at once, one process each. Default: up to 8, capped by CPU count and file count.</td></tr>
+          <tr><td>--separator</td><td>SEP</td><td>Field separator. Default: <code>,</code>.</td></tr>
+          <tr><td>--batch-size</td><td>N</td><td>Rows read at a time per worker. Default: sized from each file's width to about 1,000,000 cells. Lower it if a run is killed for memory.</td></tr>
+          <tr><td>--values-tracked</td><td>N</td><td>Distinct values counted per column before the count becomes a minimum. Default: 1,000.</td></tr>
+          <tr><td>--values-shown</td><td>N</td><td>Values listed per column in the report. Default: 10.</td></tr>
+          <tr><td>--no-identifier-check</td><td></td><td>Skips the check for un-anonymised data.</td></tr>
+          <tr><td>--no-croissant</td><td></td><td>Skips the par-baked Croissant files and their Markdown.</td></tr>
+          <tr><td>--no-checkpoints</td><td></td><td>Saves no progress. A killed run starts again from the beginning.</td></tr>
+          <tr><td>--checkpoint-every</td><td>N</td><td>Rows between saves. Default: 1,000,000.</td></tr>
+          <tr><td>--checkpoint-dir</td><td>DIR</td><td>Where progress is saved. Default: <code>&lt;out&gt;/.parbake_checkpoints</code>.</td></tr>
+          <tr><td>--skip-existing</td><td></td><td>Leaves alone any file whose outputs already exist in <code>--out</code>, and reuses its index entry. Does not notice a file edited since.</td></tr>
+          <tr><td>--batch-local-copies</td><td></td><td>Each worker copies its file to local disk, reads the copy, and deletes it before taking the next file. For shared filesystems such as Lustre.</td></tr>
+          <tr><td>--local-copy-dir</td><td>DIR</td><td>Where <code>--batch-local-copies</code> puts the copies. Default: <code>$TMPDIR</code>.</td></tr>
+        </tbody>
+        <tbody class="program"><tr><th scope="colgroup" colspan="3">describe_csv.py</th></tr></tbody>
+        <tbody>
+          <tr><td>describe_csv.py</td><td>CSV_PATH</td><td>Measures one CSV and prints its report. Reads the whole file unless <code>--preview</code> is given.</td></tr>
+          <tr><td>--preview</td><td>[N]</td><td>Reads only the first N rows. Default N when given without a number: 1,000.</td></tr>
+          <tr><td>--json</td><td>PATH</td><td>Also writes the summary as JSON.</td></tr>
+          <tr><td>--quiet</td><td></td><td>Shows no progress while reading.</td></tr>
+          <tr><td>--batch-size</td><td>N</td><td>As for <code>parbakery.py</code>.</td></tr>
+          <tr><td>--values-tracked · --values-shown</td><td>N</td><td>As for <code>parbakery.py</code>.</td></tr>
+          <tr><td>--separator</td><td>SEP</td><td>As for <code>parbakery.py</code>.</td></tr>
+          <tr><td>--no-identifier-check</td><td></td><td>As for <code>parbakery.py</code>.</td></tr>
+        </tbody>
+        <tbody class="program"><tr><th scope="colgroup" colspan="3">croissant_to_md.py</th></tr></tbody>
+        <tbody>
+          <tr><td>croissant_to_md.py</td><td>FILE [OUTPUT]</td><td>Renders a Croissant JSON file as Markdown, to OUTPUT or to standard output.</td></tr>
+          <tr><td>-o · --output</td><td>PATH</td><td>The same as OUTPUT.</td></tr>
+          <tr><td>--version</td><td></td><td>Prints the version.</td></tr>
+        </tbody>
+        <tbody class="program"><tr><th scope="colgroup" colspan="3">parsing_tools/pod_logs.py</th></tr></tbody>
+        <tbody>
+          <tr><td>parsing_tools/pod_logs.py</td><td>SOURCE...</td><td>Converts pod-log files to CSV and JSON Lines. A directory contributes the exports directly inside it.</td></tr>
+          <tr><td>--out</td><td>DIR</td><td>Where the output goes. Default: beside each source.</td></tr>
+          <tr><td>--workers</td><td>N</td><td>Files parsed at once, one process each. Default: as for <code>parbakery.py</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="imports-heading">
+    <h2 id="imports-heading">Who imports whom</h2>
+    <p class="section-intro">Each row is a module; a mark means it imports the module named at the top of that column. Modules are ordered so every mark sits right of the shaded diagonal: no module imports one listed above it.</p>
+    <figure>
+      <div class="matrix-wrap">
+        <table class="matrix" id="import-matrix" aria-describedby="matrix-caption"></table>
+      </div>
+      <figcaption id="matrix-caption"><strong>settings is imported by 9 of the 15 modules</strong> and holds every constant. The three grey columns are third-party libraries: pandas is needed only for reading and measuring, psutil only for the live display. <code>croissant_to_md</code> is used by nothing inside parbake; bakery imports it.</figcaption>
+    </figure>
+  </section>
+
+  <section aria-labelledby="outside-heading">
+    <h2 id="outside-heading">Outside the pipeline</h2>
+    <figure>
+      <div class="scroll">
+        <svg viewBox="0 0 1100 200" role="img" aria-label="Pod logs are converted to CSV by parsing_tools/pod_logs.py, which parbakery.py measures into par-baked Croissants, which bakery finishes. pod_logs.py imports parbakery's worker count, start method and progress display; bakery imports parbake's Markdown renderer, folder names and par-baked markers.">
+          <defs>
+            <marker id="arrow2" class="m-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <rect class="node" x="20" y="110" width="180" height="64" rx="3"/>
+          <text class="t-title" x="110" y="137" text-anchor="middle">Kubernetes pod logs</text>
+          <text class="t-sub" x="110" y="155" text-anchor="middle">*.txt, one JSON record per line</text>
+
+          <rect class="node" x="313" y="110" width="180" height="64" rx="3"/>
+          <text class="t-name" x="403" y="137" text-anchor="middle">pod_logs.py</text>
+          <text class="t-sub" x="403" y="155" text-anchor="middle">parsing_tools/, run by hand</text>
+
+          <rect class="node" x="606" y="110" width="180" height="64" rx="3"/>
+          <text class="t-name" x="696" y="137" text-anchor="middle">parbakery.py</text>
+          <text class="t-sub" x="696" y="155" text-anchor="middle">measures each CSV</text>
+
+          <rect class="node" x="899" y="110" width="180" height="64" rx="3"/>
+          <text class="t-title" x="989" y="137" text-anchor="middle">bakery</text>
+          <text class="t-sub" x="989" y="155" text-anchor="middle">separate repository</text>
+
+          <line class="edge" x1="200" y1="142" x2="311" y2="142" marker-end="url(#arrow2)"/>
+          <text class="t-label" x="256" y="134" text-anchor="middle">reads</text>
+          <line class="edge" x1="493" y1="142" x2="604" y2="142" marker-end="url(#arrow2)"/>
+          <text class="t-label" x="549" y="134" text-anchor="middle">.parsed.csv</text>
+          <line class="edge" x1="786" y1="142" x2="897" y2="142" marker-end="url(#arrow2)"/>
+          <text class="t-label" x="842" y="134" text-anchor="middle">.parbaked.json</text>
+
+          <path class="edge edge-dashed" d="M403,110 V80 H656 V108" marker-end="url(#arrow2)"/>
+          <text class="t-label" x="530" y="58" text-anchor="middle">imports worker_count, _pool_context</text>
+          <text class="t-label" x="530" y="72" text-anchor="middle">and progress.ProgressDisplay</text>
+
+          <path class="edge edge-dashed" d="M989,110 V80 H736 V108" marker-end="url(#arrow2)"/>
+          <text class="t-label" x="862" y="58" text-anchor="middle">imports render_markdown,</text>
+          <text class="t-label" x="862" y="72" text-anchor="middle">folder names, par-baked markers</text>
+        </svg>
+      </div>
+      <figcaption><strong>Solid arrows pass a file on; dashed arrows are imports.</strong> Neither tool changes parbake's pipeline: pod_logs.py writes a CSV that parbakery.py is then pointed at, and bakery reads the par-baked Croissants parbakery.py wrote.</figcaption>
+    </figure>
+  </section>
+
+  <section aria-labelledby="paste-heading">
+    <h2 id="paste-heading">Paste into Claude chat</h2>
+    <p class="section-intro">A description and a Mermaid diagram of the same architecture, as plain text.</p>
+    <div class="paste">
+      <div class="paste-bar">
+        <button type="button" id="copy-button">Copy text</button>
+        <span id="copy-status" role="status"></span>
+      </div>
+<pre id="paste-text">Here is the architecture of parbake, a Python tool. Use it as context.
+
+parbake measures every CSV file directly inside a directory and writes, per
+file: a measurement report, a par-baked Croissant metadata file (built to fail
+validation until a person adds data types, a checksum and the correct
+conformsTo), a Markdown rendering of it, and a directory index. It records no
+judgements: no field meanings, types, licence or caveats.
+
+Run: python3 parbakery.py &lt;directory&gt; [--full] [--out DIR] [--workers N]
+
+Reading: CSV, plain or .gz/.bz2/.xz. First 1,000 rows by default, --full for
+all. Values read as text. Batches of about 1,000,000 cells. Per column: rows,
+empty, NA-like text, distinct values (up to 1,000 tracked) and counts, value
+lengths, numeric count and min/max, all-empty and single-value flags. An
+anonymisation check flags name-matched columns holding letters, and path-like
+values.
+
+Scaling: one worker process per file (default up to 8). A file is never split
+across workers. --batch-local-copies copies each file to local disk first.
+
+Fault tolerance: a failed file or dead worker is recorded and the run
+continues. Checkpoints every 1,000,000 rows; resumed only if format version,
+file size, mtime and measurement settings match; deleted when the file
+finishes. --skip-existing skips files whose outputs already exist.
+
+Modules:
+  parbakery.py          command line; finds files; runs workers; builds the index
+  describe_csv.py       measures one CSV: batches, totals, checkpoints
+  measuring.py          ColumnSummary, per-column running totals
+  identifiers.py        IdentifierCheck, the anonymisation check
+  sources.py            file matching, compression, batch size, row estimates
+  checkpoints.py        CheckpointStore: save, validate, load, discard
+  already_done.py       --skip-existing, rebuilds index entries from outputs
+  staging.py            per-worker local copies
+  parbaked_croissant.py builds the par-baked Croissant and its Markdown
+  reporting.py          per-file report and directory index
+  progress.py           per-file live display (uses resources.py)
+  resources.py          memory and CPU of the run's processes (psutil)
+  formatting.py         human-readable numbers, sizes, durations
+  settings.py           every constant
+  croissant_to_md.py    standalone: any Croissant JSON to Markdown
+  parsing_tools/pod_logs.py  standalone: Kubernetes pod logs to CSV
+
+```mermaid
+flowchart LR
+  dir["data directory&lt;br/&gt;*.csv, .gz, .bz2, .xz"] --&gt; pk
+
+  subgraph parent["parent process"]
+    pk["parbakery.py"] --&gt; ad["already_done&lt;br/&gt;--skip-existing"]
+    ad --&gt; pool["worker_count + pool&lt;br/&gt;one process per file"]
+    prog["progress + resources&lt;br/&gt;live display"]
+    idx["reporting.build_index"]
+  end
+
+  subgraph worker["worker process, one per file"]
+    stg["staging&lt;br/&gt;--batch-local-copies"] --&gt; load
+    subgraph dc["describe_csv.py"]
+      load["checkpoints.load"] --&gt; read["sources + pandas.read_csv&lt;br/&gt;next batch, as text"]
+      read --&gt; meas["measuring + identifiers&lt;br/&gt;update column totals"]
+      meas --&gt; save["checkpoints.save&lt;br/&gt;every 1,000,000 rows"]
+      save --&gt;|loop| read
+      save --&gt;|end of file| disc["checkpoints.discard"]
+    end
+    disc --&gt; rep["reporting.print_report"]
+    rep --&gt; pc["parbaked_croissant"]
+  end
+
+  pool --&gt;|one job per file| stg
+  worker -.-&gt;|progress over a queue| prog
+  pool --&gt;|after the last file| idx
+
+  ck[(".parbake_checkpoints/")] -.-&gt; load
+  save -.-&gt; ck
+  rep --&gt; txt["parbaked_txt/*.txt"]
+  pc --&gt; js["parbaked_croissants/*.parbaked.json"]
+  pc --&gt; md["parbaked_markdown/*.parbaked.md"]
+  idx --&gt; ix["DIRECTORY_DOCUMENTATION.txt"]
+```</pre>
+    </div>
+  </section>
+</main>
+
+<script>
+  (function () {
+    var modules = [
+      ["parbakery", "command line, runs files"],
+      ["describe_csv", "measures one CSV"],
+      ["already_done", "--skip-existing"],
+      ["checkpoints", "save and resume"],
+      ["parbaked_croissant", "par-baked Croissant"],
+      ["progress", "live display"],
+      ["reporting", "report and index"],
+      ["staging", "local copies"],
+      ["identifiers", "anonymisation check"],
+      ["measuring", "per-column totals"],
+      ["sources", "compression, batch size"],
+      ["resources", "CPU and memory"],
+      ["formatting", "readable numbers"],
+      ["settings", "every constant"],
+      ["croissant_to_md", "standalone renderer"]
+    ];
+    var external = ["pandas", "numpy", "psutil"];
+    var imports = {
+      parbakery: ["already_done", "checkpoints", "describe_csv", "identifiers", "parbaked_croissant", "progress", "reporting", "settings", "sources", "staging"],
+      describe_csv: ["checkpoints", "identifiers", "measuring", "reporting", "settings", "sources", "pandas"],
+      already_done: ["identifiers", "settings", "sources"],
+      checkpoints: ["measuring", "settings"],
+      parbaked_croissant: ["sources"],
+      progress: ["formatting", "resources"],
+      reporting: ["formatting", "settings"],
+      staging: ["settings"],
+      identifiers: ["settings"],
+      measuring: ["settings", "pandas", "numpy"],
+      sources: ["settings", "pandas"],
+      resources: ["formatting", "psutil"],
+      formatting: [],
+      settings: [],
+      croissant_to_md: []
+    };
+
+    var table = document.getElementById("import-matrix");
+    var names = modules.map(function (m) { return m[0]; });
+    var columns = names.concat(external);
+
+    var thead = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    var corner = document.createElement("th");
+    corner.className = "corner";
+    corner.scope = "col";
+    corner.textContent = "module imports →";
+    headRow.appendChild(corner);
+    columns.forEach(function (name, index) {
+      var th = document.createElement("th");
+      th.scope = "col";
+      th.className = "col" + (index >= names.length ? " external" : "") + (index === names.length ? " first-external" : "");
+      var span = document.createElement("span");
+      span.textContent = name;
+      th.appendChild(span);
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var counts = columns.map(function () { return 0; });
+    var tbody = document.createElement("tbody");
+    modules.forEach(function (module, row) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("th");
+      th.scope = "row";
+      th.innerHTML = '<span class="mname"></span><span class="mrole"></span>';
+      th.querySelector(".mname").textContent = module[0];
+      th.querySelector(".mrole").textContent = module[1];
+      tr.appendChild(th);
+      columns.forEach(function (name, index) {
+        var td = document.createElement("td");
+        if (index === row) td.className = "diagonal";
+        if (index === names.length) td.className = "first-external";
+        if (imports[module[0]].indexOf(name) !== -1) {
+          var dot = document.createElement("span");
+          dot.className = "dot" + (index >= names.length ? " external" : "");
+          dot.setAttribute("role", "img");
+          dot.setAttribute("aria-label", module[0] + " imports " + name);
+          td.appendChild(dot);
+          counts[index] += 1;
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    var tfoot = document.createElement("tfoot");
+    var footRow = document.createElement("tr");
+    var footLabel = document.createElement("th");
+    footLabel.scope = "row";
+    footLabel.textContent = "imported by";
+    footRow.appendChild(footLabel);
+    counts.forEach(function (count, index) {
+      var td = document.createElement("td");
+      if (index === names.length) td.className = "first-external";
+      td.textContent = count ? String(count) : "";
+      footRow.appendChild(td);
+    });
+    tfoot.appendChild(footRow);
+    table.appendChild(tfoot);
+
+    var button = document.getElementById("copy-button");
+    var status = document.getElementById("copy-status");
+    var text = document.getElementById("paste-text");
+    function selectText() {
+      var range = document.createRange();
+      range.selectNodeContents(text);
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    button.addEventListener("click", function () {
+      var value = text.textContent;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(value).then(function () {
+          status.textContent = "Copied.";
+        }, function () {
+          selectText();
+          status.textContent = "Text selected. Press Ctrl+C or Cmd+C to copy.";
+        });
+      } else {
+        selectText();
+        status.textContent = "Text selected. Press Ctrl+C or Cmd+C to copy.";
+      }
+    });
+  })();
+</script>
+</body>
+</html>

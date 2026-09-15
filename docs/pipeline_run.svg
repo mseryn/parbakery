@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 752" role="img" aria-label="A parbake run: the parent process lists the directory, skips finished files and starts one worker process per file. Each worker optionally copies its file locally, then describe_csv loads any checkpoint, reads batches, updates column totals and saves a checkpoint every million rows until the file ends, and deletes the checkpoint. The worker writes the report and the par-baked Croissant; workers report progress to the parent over a queue; after the last file the parent writes the directory index.">
+<style>
+  .node { fill: #FFFFFF; stroke: #9AA6B2; stroke-width: 1; }
+  .group { fill: #E9EDF2; stroke: #9AA6B2; stroke-width: 1; }
+  .region, .person { fill: #F2F4F7; stroke: #2656A6; stroke-width: 1.25; stroke-dasharray: 7 5; }
+  .region-behind { fill: #F2F4F7; stroke: #9AA6B2; stroke-width: 1; stroke-dasharray: 7 5; }
+  .table-row { fill: #FFFFFF; stroke: #C9D1D9; stroke-width: 1; }
+  .folder { fill: none; stroke: #9AA6B2; stroke-width: 1; stroke-dasharray: 2 4; }
+  .file { fill: #FFFFFF; stroke: #C9D1D9; stroke-width: 1; }
+  .edge { fill: none; stroke: #5A6673; stroke-width: 1.25; }
+  .edge-accent { stroke: #2656A6; }
+  .edge-dashed { stroke-dasharray: 5 4; }
+  .t-name { font-family: 'IBM Plex Mono', Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; fill: #17212C; }
+  .t-title { font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #17212C; }
+  .t-sub, .t-label { font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #5A6673; }
+  .t-file { font-family: 'IBM Plex Mono', Menlo, Consolas, monospace; font-size: 11px; fill: #17212C; }
+  .t-table { font-family: 'IBM Plex Mono', Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #17212C; }
+  .t-cluster { font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; fill: #5A6673; }
+  .t-region { font-family: 'IBM Plex Mono', Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #2656A6; }
+  .t-folder { font-family: 'IBM Plex Mono', Menlo, Consolas, monospace; font-size: 12px; font-weight: 600; fill: #17212C; }
+  .t-label-accent { font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #2656A6; }
+  .t-key { font-family: 'IBM Plex Mono', Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: #2656A6; }
+  .m-ink path { fill: #5A6673; }
+  .m-accent path { fill: #2656A6; }
+</style>
+<rect width="100%" height="100%" fill="#F2F4F7"/>
+          <defs>
+            <marker id="arrow" class="m-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="arrow-accent" class="m-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- input -->
+          <rect class="node" x="16" y="62" width="150" height="130" rx="3"/>
+          <text class="t-title" x="91" y="87" text-anchor="middle">data directory</text>
+          <text class="t-file" x="91" y="111" text-anchor="middle">*.csv  *.csv.gz</text>
+          <text class="t-file" x="91" y="126" text-anchor="middle">*.csv.bz2  *.csv.xz</text>
+          <text class="t-sub" x="91" y="152" text-anchor="middle">other files: named in</text>
+          <text class="t-sub" x="91" y="166" text-anchor="middle">the index, never read</text>
+          <text class="t-sub" x="91" y="180" text-anchor="middle">top level only</text>
+          <line class="edge" x1="166" y1="85" x2="204" y2="85" marker-end="url(#arrow)"/>
+
+          <!-- parent process -->
+          <rect class="region" x="186" y="30" width="220" height="642" rx="6"/>
+          <text class="t-region" x="198" y="48">parent process</text>
+
+          <rect class="node" x="206" y="62" width="180" height="46" rx="3"/>
+          <text class="t-name" x="296" y="81" text-anchor="middle">parbakery.py</text>
+          <text class="t-sub" x="296" y="97" text-anchor="middle">command line, finds files</text>
+          <line class="edge" x1="296" y1="108" x2="296" y2="122" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="206" y="124" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="140" text-anchor="middle">already_done</text>
+          <text class="t-sub" x="296" y="155" text-anchor="middle">--skip-existing: skip finished</text>
+          <line class="edge" x1="296" y1="164" x2="296" y2="178" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="206" y="180" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="196" text-anchor="middle">worker_count · pool</text>
+          <text class="t-sub" x="296" y="211" text-anchor="middle">one process per file, up to 8</text>
+          <line class="edge" x1="296" y1="220" x2="296" y2="234" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="206" y="236" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="252" text-anchor="middle">progress · resources</text>
+          <text class="t-sub" x="296" y="267" text-anchor="middle">draws what workers report</text>
+
+          <line class="edge" x1="296" y1="276" x2="296" y2="610" marker-end="url(#arrow)"/>
+          <text class="t-label" x="306" y="436">after the last</text>
+          <text class="t-label" x="306" y="450">file finishes</text>
+
+          <rect class="node" x="206" y="612" width="180" height="40" rx="3"/>
+          <text class="t-name" x="296" y="628" text-anchor="middle">reporting.build_index</text>
+          <text class="t-sub" x="296" y="643" text-anchor="middle">the directory index</text>
+
+          <!-- worker process -->
+          <rect class="region-behind" x="494" y="122" width="360" height="542" rx="6"/>
+          <rect class="region" x="486" y="130" width="360" height="542" rx="6"/>
+          <text class="t-region" x="498" y="148">worker process · one per file</text>
+
+          <line class="edge edge-accent" x1="386" y1="200" x2="514" y2="200" marker-end="url(#arrow-accent)"/>
+          <text class="t-label-accent" x="446" y="215" text-anchor="middle">one job</text>
+          <text class="t-label-accent" x="446" y="228" text-anchor="middle">per file</text>
+
+          <rect class="node" x="516" y="180" width="300" height="40" rx="3"/>
+          <text class="t-name" x="666" y="196" text-anchor="middle">staging</text>
+          <text class="t-sub" x="666" y="211" text-anchor="middle">with --batch-local-copies: read a local copy</text>
+          <line class="edge" x1="666" y1="220" x2="666" y2="234" marker-end="url(#arrow)"/>
+
+          <rect class="group" x="500" y="236" width="332" height="304" rx="4"/>
+          <text class="t-name" x="516" y="256">describe_csv.py</text>
+
+          <line class="edge edge-accent edge-dashed" x1="500" y1="256" x2="388" y2="256" marker-end="url(#arrow-accent)"/>
+          <text class="t-label-accent" x="446" y="271" text-anchor="middle">progress</text>
+          <text class="t-label-accent" x="446" y="284" text-anchor="middle">over a queue</text>
+
+          <rect class="node" x="530" y="270" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="284" text-anchor="middle">checkpoints.load</text>
+          <text class="t-sub" x="671" y="298" text-anchor="middle">resume if file and settings unchanged</text>
+          <line class="edge" x1="671" y1="304" x2="671" y2="318" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="530" y="320" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="334" text-anchor="middle">sources · pandas.read_csv</text>
+          <text class="t-sub" x="671" y="348" text-anchor="middle">next batch, read as text</text>
+          <line class="edge" x1="671" y1="354" x2="671" y2="368" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="530" y="370" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="384" text-anchor="middle">measuring · identifiers</text>
+          <text class="t-sub" x="671" y="398" text-anchor="middle">update the per-column totals</text>
+          <line class="edge" x1="671" y1="404" x2="671" y2="418" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="530" y="420" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="434" text-anchor="middle">checkpoints.save</text>
+          <text class="t-sub" x="671" y="448" text-anchor="middle">every 1,000,000 rows</text>
+
+          <path class="edge" d="M530,437 H514 V337 H528" marker-end="url(#arrow)"/>
+          <line class="edge" x1="671" y1="454" x2="671" y2="488" marker-end="url(#arrow)"/>
+          <text class="t-label" x="684" y="475">at end of file or preview limit</text>
+
+          <rect class="node" x="530" y="490" width="282" height="34" rx="3"/>
+          <text class="t-name" x="671" y="504" text-anchor="middle">checkpoints.discard</text>
+          <text class="t-sub" x="671" y="518" text-anchor="middle">file finished: delete its checkpoint</text>
+
+          <line class="edge" x1="666" y1="540" x2="666" y2="548" marker-end="url(#arrow)"/>
+          <rect class="node" x="516" y="550" width="300" height="40" rx="3"/>
+          <text class="t-name" x="666" y="566" text-anchor="middle">reporting.print_report</text>
+          <text class="t-sub" x="666" y="581" text-anchor="middle">the per-file report</text>
+          <line class="edge" x1="666" y1="590" x2="666" y2="604" marker-end="url(#arrow)"/>
+
+          <rect class="node" x="516" y="606" width="300" height="40" rx="3"/>
+          <text class="t-name" x="666" y="622" text-anchor="middle">parbaked_croissant</text>
+          <text class="t-sub" x="666" y="637" text-anchor="middle">the par-baked Croissant and its Markdown</text>
+
+          <!-- output folder -->
+          <rect class="folder" x="876" y="30" width="214" height="712" rx="6"/>
+          <text class="t-folder" x="888" y="48">&lt;out&gt;/</text>
+
+          <rect class="file" x="886" y="340" width="194" height="44" rx="3"/>
+          <text class="t-file" x="896" y="358">.parbake_checkpoints/</text>
+          <text class="t-sub" x="896" y="374">&lt;name&gt;.checkpoint.json</text>
+          <path class="edge" d="M884,352 H852 V287 H814" marker-end="url(#arrow)"/>
+          <path class="edge" d="M812,437 H864 V372 H882" marker-end="url(#arrow)"/>
+
+          <rect class="file" x="886" y="550" width="194" height="40" rx="3"/>
+          <text class="t-file" x="896" y="566">parbaked_txt/</text>
+          <text class="t-sub" x="896" y="581">&lt;name&gt;.txt</text>
+          <line class="edge" x1="816" y1="570" x2="882" y2="570" marker-end="url(#arrow)"/>
+
+          <rect class="file" x="886" y="600" width="194" height="40" rx="3"/>
+          <text class="t-file" x="896" y="616">parbaked_croissants/</text>
+          <text class="t-sub" x="896" y="631">&lt;name&gt;.parbaked.json</text>
+
+          <rect class="file" x="886" y="648" width="194" height="40" rx="3"/>
+          <text class="t-file" x="896" y="664">parbaked_markdown/</text>
+          <text class="t-sub" x="896" y="679">&lt;name&gt;.parbaked.md</text>
+          <path class="edge" d="M816,626 H856 V620 H882" marker-end="url(#arrow)"/>
+          <path class="edge" d="M856,626 V668 H882" marker-end="url(#arrow)"/>
+
+          <rect class="file" x="886" y="700" width="194" height="36" rx="3"/>
+          <text class="t-file" x="896" y="723">DIRECTORY_DOCUMENTATION.txt</text>
+          <path class="edge" d="M386,632 H446 V718 H882" marker-end="url(#arrow)"/>
+          <text class="t-label" x="666" y="711" text-anchor="middle">writes the index</text>
+        </svg>

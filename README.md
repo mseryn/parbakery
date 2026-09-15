@@ -294,12 +294,70 @@ change anything.
 which flags `MACHINE_NAME` and `QUEUE_NAME` alongside the real ones.
 
 
+## Files and artifacts
+
+Paths are relative to this repository, except Input, Output and Working state
+rows, which are where a run finds or writes them. Angle brackets mark a name
+that varies. bakery's files are listed in bakery's README.
+
+Program: run from the command line. Module: imported by other files. Test: run by pytest. Test fixture: data a test reads. Documentation and Configuration: in the repository. Input: read from elsewhere. Output: written by a run. Working state: written during a run and not committed.
+
+| Path | Category | Purpose |
+|---|---|---|
+| `parbakery.py` | Program | Command line. Finds the CSVs in a directory, runs one worker process per file, and writes the index. |
+| `describe_csv.py` | Program | Measures one CSV in batches and saves and resumes its checkpoints. parbakery.py calls it; it also runs on its own. |
+| `croissant_to_md.py` | Program | Renders any Croissant JSON file as Markdown. Also imported by bakery. |
+| `parsing_tools/pod_logs.py` | Program | Converts Kubernetes pod logs, one JSON record per line, to CSV and JSON Lines for parbakery.py to measure. |
+| `measuring.py` | Module | ColumnSummary: the running totals kept for one column. |
+| `identifiers.py` | Module | IdentifierCheck: flags columns whose values may not be anonymised. |
+| `sources.py` | Module | CSV and compression suffixes, row estimates for progress, and batch size. |
+| `checkpoints.py` | Module | CheckpointStore: saves, validates, loads and deletes checkpoints. |
+| `already_done.py` | Module | --skip-existing: finds files whose outputs exist and rebuilds their index entries. |
+| `staging.py` | Module | --batch-local-copies: a copy on local disk per worker. |
+| `parbaked_croissant.py` | Module | Builds the par-baked Croissant file and its Markdown. |
+| `reporting.py` | Module | Writes the per-file report and the directory index. |
+| `progress.py` | Module | ProgressDisplay: one line per file, redrawn in a terminal. |
+| `resources.py` | Module | Memory and CPU use of the run's processes, through psutil. |
+| `formatting.py` | Module | Human-readable numbers, byte sizes and durations. |
+| `settings.py` | Module | Every constant, and the Python version check. |
+| `parsing_tools/__init__.py` | Module | Makes parsing_tools importable by its tests. Empty. |
+| `tests/test_parbakery.py` | Test | Directory runs, parallel workers and output layout. |
+| `tests/test_describe_csv.py` | Test | Measuring one CSV. |
+| `tests/test_identifiers.py` | Test | The anonymisation check. |
+| `tests/test_checkpoints.py` | Test | Checkpoints, and resuming a killed read. |
+| `tests/test_already_done.py` | Test | --skip-existing. |
+| `tests/test_staging.py` | Test | Local copies. |
+| `tests/test_parbaked_croissant.py` | Test | Par-baked Croissant files, including that they fail validation for the intended reason. |
+| `tests/test_progress.py` | Test | The progress display. |
+| `tests/test_skill_markers.py` | Test | The markers the skill tells an AI to look for appear in generated files. |
+| `parsing_tools/tests/test_pod_logs.py` | Test | pod_logs.py. |
+| `parsing_tools/tests/fixtures/sambastack_sample.txt` | Test fixture | Three pod-log records from a real export, with the email address and API key hash replaced. |
+| `README.md` | Documentation | How to run parbake, its options, and what it writes. |
+| `NOTES.md` | Documentation | Design reasoning, and the measurements behind decisions. |
+| `parsing_tools/README.md` | Documentation | How to run pod_logs.py, its output columns, and its limits. |
+| `skills/reading-croissant-datasets/SKILL.md` | Documentation | Instructions for an AI model reading a Croissant file together with its data. |
+| `docs/pipeline_map.html` | Documentation | Pipeline map page: run diagram, guarantees, import grid, and text for Claude chat. |
+| `docs/pipeline_run.svg` | Documentation | The run diagram as a standalone SVG, for editing. |
+| `docs/outside_the_pipeline.svg` | Documentation | How pod_logs.py and bakery connect to parbake, as a standalone SVG. |
+| `docs/for_claude_chat.md` | Documentation | Plain-text description and Mermaid diagram of parbake. |
+| `pyproject.toml` | Configuration | Project metadata and pytest settings, including both test directories. |
+| `.gitignore` | Configuration | Excludes caches and parbake_output/. |
+| `<out>/DIRECTORY_DOCUMENTATION.txt` | Output | Index: every file in the directory, and a summary line for each CSV. <out> defaults to parbake_output/. |
+| `<out>/parbaked_txt/<name>.txt` | Output | Measurement report for one CSV. |
+| `<out>/parbaked_croissants/<name>.parbaked.json` | Output | Par-baked Croissant: file identity, columns, measurements. Fails validation by design. bakery's input. |
+| `<out>/parbaked_markdown/<name>.parbaked.md` | Output | Markdown rendering of the par-baked Croissant. |
+| `<stem>.parsed.csv` | Output | pod_logs.py: one row per log record, one column per field. Written beside the source or into --out. |
+| `<stem>.parsed.jsonl` | Output | pod_logs.py: the same rows as JSON Lines. |
+| `<out>/.parbake_checkpoints/<name>.checkpoint.json` | Working state | Progress through one file. Deleted when the file finishes. |
+| `$TMPDIR/parbake_staging_*/` | Working state | Copies made by --batch-local-copies. Each is deleted after it is read. |
+
+
 ## Tests
 
     cd parbake
     pytest
 
-263 tests, a few seconds. They cover the measurements against files whose
+293 tests, a few seconds: 263 in `tests/`, 30 for `parsing_tools/` in `parsing_tools/tests/`. They cover the measurements against files whose
 contents are known, the identifier check, and the directory pass. Three
 behaviours are pinned deliberately because getting them wrong would be quiet
 rather than loud:
